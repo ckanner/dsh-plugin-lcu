@@ -166,13 +166,24 @@ async function prepareProjection(
   try {
     const refs = await attachments.saveImages(decoded)
     const byIndex = new Map(indexes.map((index, offset) => [index, refs[offset]] as const))
-    return content.map((block, index) => {
+    const projected = content.map((block, index) => {
       if (!isRecord(block) || block.type !== 'image') return block as { type: string }
       const ref = byIndex.get(index)
       return ref === undefined
         ? { type: 'text', text: imageDiagnostic(block, 'the attachment store returned no reference') }
         : { type: 'image', attachment: ref }
     })
+    const paths = refs.flatMap((ref) => {
+      try {
+        const path = attachments.imageHostPath(ref)
+        return typeof path === 'string' && path !== '' ? [path] : []
+      } catch {
+        // A backend that cannot name a path is not an error; it just gets no note.
+        return []
+      }
+    })
+    const note = storedImageNote(paths)
+    return note === undefined ? projected : [...projected, { type: 'text', text: note }]
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error)
     return content.map((block) =>
@@ -199,6 +210,26 @@ export interface LcuToolOptions {
    * ordinal: the runtime treats a repeated id as the same, already-ended turn.
    */
   readonly currentTurn?: () => string | undefined
+}
+
+/**
+ * Tell the model where a stored screenshot actually is, and what it may do with it.
+ *
+ * Without this the model has an image it cannot place: the JavaScript sandbox
+ * refuses every write (EPERM, even in the temporary directory), so a model asked
+ * for a file probes the sandbox blindly — one recorded run spent six calls doing
+ * that before copying an object straight out of the store's internal layout by
+ * hash, which breaks the moment that layout changes.
+ *
+ * @param paths - host paths the attachment store resolved, in image order.
+ * @returns the note, or `undefined` when no path resolved.
+ */
+export function storedImageNote(paths: readonly string[]): string | undefined {
+  if (paths.length === 0) return undefined
+  const list = paths.map((path) => `  ${path}`).join('\n')
+  return `The harness stored ${paths.length === 1 ? 'this image' : 'these images'} on the host filesystem:\n${list}\n`
+    + 'The JavaScript sandbox cannot write files (fs writes fail with EPERM), so to place a copy in '
+    + 'the workspace use bash, for example: `cp \'<path>\' ./screenshot.jpg`.'
 }
 
 /**

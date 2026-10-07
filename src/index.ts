@@ -38,6 +38,24 @@ export const inject = ['tools', 'systemPrompt']
 /** Where the installer puts the launcher. */
 const DEFAULT_COMMAND = join(homedir(), '.local/share/lcu/current/bin/lcu')
 
+/**
+ * What this host adds to the server's own instructions.
+ *
+ * Everything here is a property of this harness, not of the runtime: the server
+ * cannot describe a sandbox it does not own. Stating it up front is the
+ * difference between a model that copies a stored image with bash and one that
+ * spends a turn discovering that `fs.writeFileSync` returns EPERM.
+ */
+const LCU_HOST_NOTE = [
+  'Host notes for this environment:',
+  '- `js` runs in a sandbox that cannot write files anywhere (writes fail with EPERM, including in the',
+  '  temporary directory). Do not try to save with `fs`; it will not work.',
+  '- Screenshots are delivered to the harness as images, and every stored image reports its host',
+  "  filesystem path in the tool result. To put a copy in the workspace, use bash: `cp '<path>' <target>`.",
+  '- Anything the sandbox cannot do — writing files, reading the host filesystem — is available through',
+  '  the `bash` tool instead.',
+].join('\n')
+
 /** The section order of the injected instructions, after the tool guidance. */
 const DEFAULT_SECTION_ORDER = 0
 
@@ -261,13 +279,16 @@ export function apply(ctx: Context, config: Config): void {
       throw error
     }
 
-    if (connection.instructions !== '') {
-      agent.ctx.systemPrompt.section({
-        name: 'lcu-instructions',
-        order: settings.sectionOrder,
-        text: connection.instructions,
-      })
-    }
+    // The server's own pointer, plus what the server cannot know: the sandbox it
+    // runs inside here. Without it a model asked to save a screenshot discovers
+    // the boundary by probing, one failed call at a time.
+    agent.ctx.systemPrompt.section({
+      name: 'lcu-instructions',
+      order: settings.sectionOrder,
+      text: connection.instructions === ''
+        ? LCU_HOST_NOTE
+        : `${connection.instructions}\n\n${LCU_HOST_NOTE}`,
+    })
 
     ctx.logger.info(`lcu: ${connection.serverInfo.name ?? 'server'} attached for this session`)
   }

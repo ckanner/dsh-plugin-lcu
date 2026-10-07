@@ -141,6 +141,17 @@ declare module '@deepseek-ai/dsh-attachment' {
 
   export interface AttachmentStore {
     saveImages(images: readonly SaveImageAttachment[]): Promise<readonly ImageAttachmentRef[]>
+    /**
+     * Locate a stored image in the harness host filesystem.
+     *
+     * This is the supported way to hand the model a path it can act on: the
+     * object layout under the store root is the backend's business.
+     *
+     * @param ref - a durable reference this store produced.
+     * @returns an absolute host path, or `undefined` when the backend is not
+     *   host-file-backed.
+     */
+    imageHostPath(ref: ImageAttachmentRef): string | undefined
   }
 }
 

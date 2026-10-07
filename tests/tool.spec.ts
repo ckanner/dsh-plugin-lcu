@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 
 import {
   buildLcuTools, capturePermissionHint, createComputerUseStopTool, decodeImage, extractText, imageDiagnostic,
-  stuckStopHint,
+  storedImageNote, stuckStopHint,
 } from '../src/tool.ts'
 import { STATIC_HOST_BUNDLE_IDS, enclosingAppBundle, isAgentHostApp } from '../src/host-guard.ts'
 
@@ -139,4 +139,20 @@ test('a latched Stop is answered with what actually clears it', () => {
 
   // The two hints never both claim the same failure.
   assert.equal(capturePermissionHint(text), undefined)
+})
+
+test('a stored screenshot comes back with a path the model can act on', () => {
+  // Without this the model knows it has an image and nothing else, and the only
+  // route it can find is copying the store's internal layout by hash.
+  const note = storedImageNote(['/Users/x/.dsh/attachments/v1/objects/de/de9ecfb6'])
+  assert.match(note ?? '', /\/Users\/x\/\.dsh\/attachments\/v1\/objects\/de\/de9ecfb6/)
+  assert.match(note ?? '', /EPERM/)
+  assert.match(note ?? '', /cp /)
+  assert.match(note ?? '', /bash/)
+
+  // Plurals and the empty case.
+  assert.match(storedImageNote(['/a', '/b']) ?? '', /these images/)
+  assert.match(storedImageNote(['/a']) ?? '', /this image/)
+  // A backend that cannot name a path gets no note rather than an empty one.
+  assert.equal(storedImageNote([]), undefined)
 })
