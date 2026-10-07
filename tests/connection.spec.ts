@@ -16,7 +16,7 @@ import { join } from 'node:path'
 
 import {
   HOST_ONLY_TOOL_NAMES, LcuConnection, MODEL_TOOL_NAMES, TURN_CLEANUP_TIMEOUT_CODE,
-  classifyTurnEndFailure, resolveElicitation,
+  classifyTurnEndFailure, resolveElicitation, turnMetadataFor,
 } from '../src/connection.ts'
 
 const LCU = join(homedir(), '.local/share/lcu/current/bin/lcu')
@@ -105,6 +105,25 @@ test('fails closed on every unexpected elicitation answer', async () => {
     await resolveElicitation(async () => await new Promise(() => {}), request, new Set([controller.signal])),
     { action: 'cancel' },
   )
+})
+
+test('every call carries the real turn the runtime keys its state by', () => {
+  // The runtime reads these; without them a Stop or a missed cleanup would look
+  // like it applied to every later turn on the connection.
+  assert.deepEqual(turnMetadataFor('session-1', '3'), {
+    'x-codex-turn-metadata': { session_id: 'session-1', turn_id: '3' },
+  })
+  assert.deepEqual(turnMetadataFor('session-1', '3', 'call-9'), {
+    'x-codex-turn-metadata': { session_id: 'session-1', turn_id: '3', call_id: 'call-9' },
+  })
+
+  // Never fabricate an identity: a lie is worse than omitting it.
+  assert.equal(turnMetadataFor(undefined, '3'), undefined)
+  assert.equal(turnMetadataFor('session-1', undefined), undefined)
+  assert.equal(turnMetadataFor('', '3'), undefined)
+  assert.equal(turnMetadataFor('session-1', ''), undefined)
+  // An absent call id is simply not a field.
+  assert.deepEqual(turnMetadataFor('s', '1', ''), { 'x-codex-turn-metadata': { session_id: 's', turn_id: '1' } })
 })
 
 test('classifies a failed turn cleanup instead of ignoring it', () => {

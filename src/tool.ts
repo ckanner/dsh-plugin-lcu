@@ -192,6 +192,11 @@ export interface LcuToolOptions {
    * host retries it and refuses the call if it still has not settled.
    */
   readonly beforeCall?: () => Promise<void>
+  /**
+   * The Agent's active turn, so calls carry the identities the runtime keys its
+   * approvals, per-turn Stop and cleanup by.
+   */
+  readonly currentTurn?: () => number | undefined
 }
 
 /**
@@ -239,7 +244,12 @@ export function createLcuTool(
       // the model misbehaves; an empty object lets the server report the missing
       // parameter specifically instead of us inventing an error.
       const callArgs = isRecord(args) ? args : {}
-      const result = await connection.callTool(toolName, callArgs, { signal: exec.signal })
+      const turn = options.currentTurn?.()
+      const result = await connection.callTool(toolName, callArgs, {
+        signal: exec.signal,
+        ...(turn === undefined ? {} : { turnId: String(turn) }),
+        ...(exec.callId === undefined || exec.callId === '' ? {} : { callId: exec.callId }),
+      })
       const content = result.content
       const text = extractText(content, toolName)
       // MCP isError becomes a thrown error so the runtime records a failed call.
@@ -381,7 +391,7 @@ export function registerLcuTools(
   agentCtx: Context,
   connection: LcuConnection,
   ctx: Context,
-  options: LcuToolOptions & { readonly currentTurn?: () => number | undefined } = {},
+  options: LcuToolOptions = {},
 ): () => void {
   const definitions = buildLcuTools(connection, ctx, options)
   if (options.currentTurn !== undefined) {

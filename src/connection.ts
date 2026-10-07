@@ -60,6 +60,35 @@ export const MODEL_TOOL_NAMES: readonly string[] = ['js', 'js_reset']
 /** Host-only tools, named so a mistake is loud rather than silent. */
 export const HOST_ONLY_TOOL_NAMES: readonly string[] = ['turn_ended', 'js_add_node_module_dir']
 
+/**
+ * Build the `_meta` the original runtime reads its session and turn from.
+ *
+ * Its approvals, per-turn Stop and cleanup are all keyed by these identities.
+ * Omitting them makes every call look like the same turn, so a Stop the user
+ * issued once, or a cleanup that never ran, then applies to every later turn on
+ * the connection. A synthetic pair would be worse than none: the runtime would
+ * key its state to a lie. Returns `undefined` unless both identities are real.
+ *
+ * @param sessionId - the host session, or `undefined` before binding.
+ * @param turnId - the active turn, or `undefined` outside one.
+ * @param callId - the host's tool-call id, when it has one.
+ * @returns the metadata block, or `undefined` when it cannot be truthful.
+ */
+export function turnMetadataFor(
+  sessionId: string | undefined,
+  turnId: string | undefined,
+  callId?: string,
+): Record<string, unknown> | undefined {
+  if (sessionId === undefined || sessionId === '' || turnId === undefined || turnId === '') return undefined
+  return {
+    'x-codex-turn-metadata': {
+      session_id: sessionId,
+      turn_id: turnId,
+      ...(callId === undefined || callId === '' ? {} : { call_id: callId }),
+    },
+  }
+}
+
 /** Lifecycle events the server accepts for `turn_ended`. */
 export type LcuTurnEndEvent = 'Stop' | 'Interrupt' | 'SubagentStop'
 
@@ -318,9 +347,22 @@ export class LcuConnection {
   async callTool(
     name: string,
     args: Readonly<Record<string, unknown>>,
-    options: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
+    options: {
+      readonly timeoutMs?: number
+      readonly signal?: AbortSignal
+      /** The real host turn; the runtime keys per-turn state by it. */
+      readonly turnId?: string
+      /** The host's tool-call id, forwarded as `call_id` when available. */
+      readonly callId?: string
+    } = {},
   ): Promise<LcuCallResult> {
-    const result = await this.#request('tools/call', { name, arguments: args }, options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS, 'tools/call', options.signal)
+    const result = await this.#request(
+      'tools/call',
+      { name, arguments: args, ...this.#turnMetadata(options.turnId, options.callId) },
+      options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
+      'tools/call',
+      options.signal,
+    )
     const content = Array.isArray(result.content) ? result.content as LcuContentBlock[] : []
     return {
       content,
@@ -363,6 +405,20 @@ export class LcuConnection {
    * orderly path; signalling first would orphan the tree on a machine that then
    * keeps reporting computer use as active.
    */
+  /**
+   * The original runtime reads its session and turn from `_meta`, and its
+   * approvals, per-turn Stop and cleanup are all keyed by them. Omitting this
+   * makes every call look like the same turn: a Stop the user issued once, or a
+   * cleanup that never ran, then applies to every later turn on the connection.
+   *
+   * It is only attached when both identities are real. A synthetic pair would be
+   * worse than none, because the runtime would key its state to a lie.
+   */
+  #turnMetadata(turnId: string | undefined, callId: string | undefined): Record<string, unknown> {
+    const meta = turnMetadataFor(this.sessionId, turnId, callId)
+    return meta === undefined ? {} : { _meta: meta }
+  }
+
   /** Whether this platform and connection expose the explicit per-app Stop. */
   get hasHostControl(): boolean {
     return this.#controlSocketPath !== undefined && !this.#closed
@@ -379,7 +435,19 @@ export class LcuConnection {
     sessionId: string,
     turnId: string,
   ): Promise<readonly { name: string; bundleIdentifier: string }[]> {
-    const result = await this.#controlRequest({ type: 'status', session_id: sessionId, turn_id: turnId })
+    let result: Record<string, unknown>
+    try {
+      result = await this.#controlRequest({ type: 'status', session_id: sessionId, turn_id: turnId })
+    } catch (error: unknown) {
+      // Before the runtime has been approved for any app it has no trusted
+      // service attached, and a turn it has never seen is not active. Both mean
+      // the same thing to a caller: nothing is held, so nothing needs releasing.
+      const message = error instanceof Error ? error.message : String(error)
+      if (/Trusted macOS control service is not connected|not active in the trusted runtime/i.test(message)) {
+        return []
+      }
+      throw error
+    }
     const applications = (result as { computerUse?: { activeApplications?: unknown } }).computerUse?.activeApplications
     if (!Array.isArray(applications)) {
       throw new LcuError('turn_ended', 'the original host returned an invalid Computer Use status')
