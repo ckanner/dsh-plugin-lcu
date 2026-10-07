@@ -58,6 +58,8 @@ export type LcuElicitationResponse =
 export const MODEL_TOOL_NAMES: readonly string[] = ['js', 'js_reset']
 
 /** Host-only tools, named so a mistake is loud rather than silent. */
+import { diag } from './diag.ts'
+
 export const HOST_ONLY_TOOL_NAMES: readonly string[] = ['turn_ended', 'js_add_node_module_dir']
 
 /**
@@ -416,6 +418,9 @@ export class LcuConnection {
    */
   #turnMetadata(turnId: string | undefined, callId: string | undefined): Record<string, unknown> {
     const meta = turnMetadataFor(this.sessionId, turnId, callId)
+    // The runtime latches per-turn state against these identities, so a missing
+    // pair is the difference between "a new turn" and "the same stopped turn".
+    diag(`call meta: session=${this.sessionId ?? 'none'} turn=${turnId ?? 'none'} sent=${meta === undefined ? 'no' : 'yes'}`)
     return meta === undefined ? {} : { _meta: meta }
   }
 
