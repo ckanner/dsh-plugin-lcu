@@ -41,6 +41,22 @@ jobs:
       # Every check the CI lane runs has to pass here too.
       - run: npm run typecheck
       - run: npm test
-      - run: npm publish --provenance --access public
+      # Idempotent: a tag whose version is already on the registry publishes
+      # nothing. Re-running a release, or tagging after a manual publish, must
+      # not turn into a red lane.
+      - name: Is this version already published?
+        id: check
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "dsh-plugin-lcu@$version" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "dsh-plugin-lcu@$version is already on the registry; skipping publish."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - if: steps.check.outputs.published == 'false'
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
