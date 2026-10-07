@@ -20,6 +20,7 @@ import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext
 
 import type { LcuConnection, LcuContentBlock, LcuTool } from './connection.ts'
 import { MODEL_TOOL_NAMES, LcuError } from './connection.ts'
+import { diag } from './diag.ts'
 
 /** Media types the attachment store admits. */
 const IMAGE_MEDIA_TYPES: readonly string[] = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
@@ -201,6 +202,28 @@ export interface LcuToolOptions {
 }
 
 /**
+ * A capture the operating system refused, rather than a runtime bug.
+ *
+ * macOS reports this as an opaque numeric error, and the model cannot act on a
+ * number: it retries, twice, and the user is left with "the screen capture
+ * failed". The remedy is a grant in System Settings, so name it.
+ */
+const CAPTURE_PERMISSION_PATTERN = /\b-10005\b|screen capture failed|not (?:authorized|permitted) to (?:capture|record|use)/i
+
+/**
+ * An actionable line for a permission failure, when the text looks like one.
+ *
+ * @param text - the server's error text.
+ * @returns the hint, or `undefined` when the failure is something else.
+ */
+export function capturePermissionHint(text: string): string | undefined {
+  if (!CAPTURE_PERMISSION_PATTERN.test(text)) return undefined
+  return 'macOS is blocking this capture. Screen Recording and Accessibility must be granted to the '
+    + 'application macOS holds responsible for it. Run `lcu doctor` (without --non-interactive) from a '
+    + 'desktop terminal, choose Open for each pane it names, grant the entries, then restart the harness.'
+}
+
+/**
  * Build one model-facing tool from a server descriptor.
  *
  * @param descriptor - the tool as `tools/list` reported it.
@@ -235,7 +258,10 @@ export function createLcuTool(
       },
       render(_args: unknown, value: unknown) {
         const content = isRecord(value) && Array.isArray(value.content) ? value.content as LcuContentBlock[] : []
-        return [{ type: 'text', text: extractText(content, toolName) }]
+        const text = extractText(content, toolName)
+        const hint = capturePermissionHint(text)
+        if (hint !== undefined) diag(`tools/call ${toolName}: capture refused by macOS; told the model how to grant it`)
+        return [{ type: 'text', text: hint === undefined ? text : `${text}\n\n${hint}` }]
       },
     },
     async execute(args: unknown, exec: ToolRunContext): Promise<unknown> {

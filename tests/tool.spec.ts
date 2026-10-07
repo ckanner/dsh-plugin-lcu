@@ -10,7 +10,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { dirname, join } from 'node:path'
 
-import { buildLcuTools, createComputerUseStopTool, decodeImage, extractText, imageDiagnostic } from '../src/tool.ts'
+import {
+  buildLcuTools, capturePermissionHint, createComputerUseStopTool, decodeImage, extractText, imageDiagnostic,
+} from '../src/tool.ts'
 import { STATIC_HOST_BUNDLE_IDS, enclosingAppBundle, isAgentHostApp } from '../src/host-guard.ts'
 
 test('extractText joins text and never returns an empty string', () => {
@@ -104,4 +106,17 @@ test('every tool the plugin registers declares a JSON-Schema object', () => {
   const schema = stop.parameters as { required?: unknown, properties: Record<string, unknown> }
   assert.equal(schema.required, undefined)
   assert.ok('app' in schema.properties)
+})
+
+test('a refused capture becomes an instruction instead of a number', () => {
+  // The model cannot act on "-10005"; it retries and the user learns nothing.
+  const hint = capturePermissionHint('Computer Use server error -10005: The screen capture failed.')
+  assert.match(hint ?? '', /Screen Recording/)
+  assert.match(hint ?? '', /lcu doctor/)
+
+  assert.ok(capturePermissionHint('not authorized to capture the display'))
+  // An ordinary failure keeps its own meaning and gets no invented advice.
+  assert.equal(capturePermissionHint('Illegal return statement'), undefined)
+  assert.equal(capturePermissionHint('Computer Use was not approved to use Finder'), undefined)
+  assert.equal(capturePermissionHint(''), undefined)
 })
