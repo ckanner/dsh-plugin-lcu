@@ -218,9 +218,15 @@ const CAPTURE_PERMISSION_PATTERN = /\b-10005\b|screen capture failed|not (?:auth
  */
 export function capturePermissionHint(text: string): string | undefined {
   if (!CAPTURE_PERMISSION_PATTERN.test(text)) return undefined
-  return 'macOS is blocking this capture. Screen Recording and Accessibility must be granted to the '
-    + 'application macOS holds responsible for it. Run `lcu doctor` (without --non-interactive) from a '
-    + 'desktop terminal, choose Open for each pane it names, grant the entries, then restart the harness.'
+  // Two causes look identical from here, and naming only one of them sends the
+  // user to check grants that were never the problem.
+  return 'macOS refused this capture. Two causes look the same from here:\n'
+    + '  1. The grants are missing: Screen Recording and Accessibility must be enabled for the\n'
+    + '     application macOS holds responsible. Check that first, and do not assume it.\n'
+    + '  2. The runtime is not ready yet: a capture attempted within about a minute of the host\n'
+    + '     application starting can fail this way while its trusted service comes up.\n'
+    + 'If the grants are already enabled, wait a few seconds and retry before concluding anything is\n'
+    + 'wrong — retrying is cheap and this failure is often transient.'
 }
 
 /**

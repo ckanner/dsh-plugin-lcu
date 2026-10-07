@@ -112,8 +112,10 @@ test('every tool the plugin registers declares a JSON-Schema object', () => {
 test('a refused capture becomes an instruction instead of a number', () => {
   // The model cannot act on "-10005"; it retries and the user learns nothing.
   const hint = capturePermissionHint('Computer Use server error -10005: The screen capture failed.')
-  assert.match(hint ?? '', /Screen Recording/)
-  assert.match(hint ?? '', /lcu doctor/)
+  // Naming only the grants sent a user whose grants were fine to check them anyway.
+  assert.match(hint ?? '', /grants are missing/)
+  assert.match(hint ?? '', /not ready yet/)
+  assert.match(hint ?? '', /transient/)
 
   assert.ok(capturePermissionHint('not authorized to capture the display'))
   // An ordinary failure keeps its own meaning and gets no invented advice.
