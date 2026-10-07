@@ -1,0 +1,10 @@
+{
+  "codex": "0.160.1",
+  "verifiedAt": "2026-10-07T09:56:24.427Z",
+  "previous": "0.160.1",
+  "gates": {
+    "handshake": "ok",
+    "schema": "ok",
+    "turn": "ok"
+  }
+}

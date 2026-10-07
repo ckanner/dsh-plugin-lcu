@@ -1,0 +1,46 @@
+# Publishing is a release, not a side effect of a push: `dsh plugin add
+# dsh-plugin-lcu` only resolves once the name exists on the registry, and an
+# artifact that is already published cannot be unpublished into a fix.
+#
+# Two ways in, and this workflow does not care which one the maintainer chose: a
+# repository NPM_TOKEN secret, or npm trusted publishing, where npm exchanges
+# this run's OIDC identity for a short-lived credential and no long-lived token
+# exists to leak.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Trusted publishing: npm accepts this run's OIDC identity in place of a token.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Verify the tag names this version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package version $version" >&2
+            exit 1
+          fi
+      # Every check the CI lane runs has to pass here too.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

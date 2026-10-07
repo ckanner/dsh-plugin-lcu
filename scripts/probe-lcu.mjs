@@ -1,0 +1,154 @@
+#!/usr/bin/env node
+/**
+ * probe-lcu.mjs — talk to the installed `lcu` MCP server directly.
+ *
+ * A diagnostic for `dsh-plugin-lcu` development: it connects the way the plugin
+ * will (newline-delimited JSON-RPC over stdio, `capabilities.elicitation`
+ * declared), prints what the server advertises, and optionally calls one tool.
+ *
+ * Usage
+ * -----
+ *   node scripts/probe-lcu.mjs                    # initialize + tools/list
+ *   node scripts/probe-lcu.mjs --instructions      # also dump server instructions
+ *   node scripts/probe-lcu.mjs --call js --code 'return await cua.listApps()'
+ *   node scripts/probe-lcu.mjs --command /path/to/lcu   # override the binary
+ *
+ * It never answers elicitations, so any call that needs an approval fails closed
+ * exactly like a host that cannot present the request.
+ */
+
+import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { createInterface } from 'node:readline'
+
+const DEFAULT_COMMAND = join(homedir(), '.local/share/lcu/current/bin/lcu')
+
+/** Newest protocol revision the MCP SDK pair here is expected to negotiate. */
+const PROTOCOL_VERSION = '2025-06-18'
+
+function parseArgs(argv) {
+  const opts = { command: DEFAULT_COMMAND, instructions: false, call: undefined, code: undefined, limit: 2000 }
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]
+    if (arg === '--command') opts.command = argv[++i]
+    else if (arg === '--instructions') opts.instructions = true
+    else if (arg === '--call') opts.call = argv[++i]
+    else if (arg === '--code') opts.code = argv[++i]
+    else if (arg === '--limit') opts.limit = Number(argv[++i])
+    else throw new Error(`unknown argument: ${arg}`)
+  }
+  return opts
+}
+
+/** One request/response session with the LCU MCP server. */
+class LcuSession {
+  constructor(command) {
+    this.nextId = 1
+    this.pending = new Map()
+    this.notifications = []
+    this.stderr = ''
+    this.child = spawn(command, [], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env })
+    this.child.stderr.on('data', (chunk) => { this.stderr += chunk.toString() })
+    this.child.on('exit', (code) => {
+      for (const { reject } of this.pending.values()) reject(new Error(`lcu exited (${code})\n${this.stderr.slice(-800)}`))
+      this.pending.clear()
+    })
+    createInterface({ input: this.child.stdout }).on('line', (line) => this.#onLine(line))
+  }
+
+  #onLine(line) {
+    if (line.trim() === '') return
+    let message
+    try { message = JSON.parse(line) } catch { return }
+    if (message.id !== undefined && message.method === undefined) {
+      const entry = this.pending.get(message.id)
+      if (entry === undefined) return
+      this.pending.delete(message.id)
+      if (message.error !== undefined) entry.reject(new Error(JSON.stringify(message.error)))
+      else entry.resolve(message.result)
+      return
+    }
+    this.notifications.push(message)
+  }
+
+  request(method, params, timeoutMs = 60_000) {
+    const id = this.nextId++
+    this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error(`${method} timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+      this.pending.set(id, {
+        resolve: (value) => { clearTimeout(timer); resolve(value) },
+        reject: (error) => { clearTimeout(timer); reject(error) },
+      })
+    })
+  }
+
+  notify(method, params) {
+    this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`)
+  }
+
+  close() { this.child.kill('SIGTERM') }
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2))
+  const session = new LcuSession(opts.command)
+  try {
+    const initialized = await session.request('initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: { elicitation: {} },
+      clientInfo: { name: 'dsh-plugin-lcu-probe', version: '0.0.1' },
+    }, 120_000)
+    console.log('=== initialize ===')
+    console.log(JSON.stringify({
+      protocolVersion: initialized.protocolVersion,
+      serverInfo: initialized.serverInfo,
+      capabilities: initialized.capabilities,
+      instructionBytes: initialized.instructions?.length ?? 0,
+    }, null, 2))
+
+    if (opts.instructions) {
+      console.log('\n=== instructions ===')
+      console.log(initialized.instructions ?? '(none)')
+    }
+
+    session.notify('notifications/initialized')
+
+    const listed = await session.request('tools/list', {}, 120_000)
+    console.log('\n=== tools ===')
+    for (const tool of listed.tools ?? []) {
+      const required = tool.inputSchema?.required ?? []
+      const props = Object.keys(tool.inputSchema?.properties ?? {})
+      console.log(`  ${tool.name.padEnd(26)} required=[${required.join(',')}] props=[${props.join(',')}]`)
+    }
+    const hostOnly = (listed.tools ?? []).filter((tool) => tool.name !== 'js' && tool.name !== 'js_reset')
+    if (hostOnly.length > 0) {
+      console.log(`\n  ⚠ host-only tools that must NOT reach the model: ${hostOnly.map((t) => t.name).join(', ')}`)
+    }
+
+    if (opts.call !== undefined) {
+      console.log(`\n=== tools/call ${opts.call} ===`)
+      const result = await session.request('tools/call', {
+        name: opts.call,
+        arguments: opts.code === undefined ? {} : { code: opts.code },
+      }, 300_000)
+      const text = (result.content ?? []).filter((item) => item.type === 'text').map((item) => item.text).join('\n')
+      console.log(`isError: ${result.isError === true}`)
+      console.log(text.slice(0, opts.limit) || `(no text; content types: ${(result.content ?? []).map((i) => i.type).join(',')})`)
+      if (text.length > opts.limit) console.log(`… (${text.length - opts.limit} more chars; raise --limit)`)
+    }
+
+    if (session.notifications.length > 0) {
+      console.log(`\n=== ${session.notifications.length} notification(s) ===`)
+      for (const note of session.notifications.slice(0, 5)) console.log(`  ${note.method}`)
+    }
+  } finally {
+    session.close()
+  }
+}
+
+await main()
