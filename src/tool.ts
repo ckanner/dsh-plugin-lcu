@@ -224,6 +224,33 @@ export function capturePermissionHint(text: string): string | undefined {
 }
 
 /**
+ * The application latching a Stop it cannot clear.
+ *
+ * A per-application Stop is cleared by the host application's own turn-ended
+ * cleanup, and that cleanup talks to the application over Apple Events. macOS
+ * refuses those for a hardened-runtime host that lacks the automation
+ * entitlement, and refuses to even prompt ("Policy disallows prompt ..."), so the
+ * cleanup times out and the Stop sticks across turns and sessions. Nothing the
+ * model retries will change that, so say what does.
+ */
+const STUCK_STOP_PATTERN = /explicitly stopped by the user for this turn/i
+
+/**
+ * An actionable line for a Stop the runtime cannot clear.
+ *
+ * @param text - the server's error text.
+ * @returns the hint, or `undefined` when the failure is something else.
+ */
+export function stuckStopHint(text: string): string | undefined {
+  if (!STUCK_STOP_PATTERN.test(text)) return undefined
+  return 'The host application still has a per-application Stop latched for this app, and its own '
+    + 'turn cleanup cannot clear it: that cleanup needs Apple Events, which macOS denies to a '
+    + 'hardened-runtime harness and will not even prompt for. Quit and relaunch the ChatGPT '
+    + 'application to clear it. Retrying, resetting the JavaScript kernel, and starting a new '
+    + 'session will not help; using a different application will.'
+}
+
+/**
  * Build one model-facing tool from a server descriptor.
  *
  * @param descriptor - the tool as `tools/list` reported it.
@@ -259,8 +286,8 @@ export function createLcuTool(
       render(_args: unknown, value: unknown) {
         const content = isRecord(value) && Array.isArray(value.content) ? value.content as LcuContentBlock[] : []
         const text = extractText(content, toolName)
-        const hint = capturePermissionHint(text)
-        if (hint !== undefined) diag(`tools/call ${toolName}: capture refused by macOS; told the model how to grant it`)
+        const hint = capturePermissionHint(text) ?? stuckStopHint(text)
+        if (hint !== undefined) diag(`tools/call ${toolName}: refused (${capturePermissionHint(text) === undefined ? 'latched Stop' : 'capture permission'}); told the model the remedy`)
         return [{ type: 'text', text: hint === undefined ? text : `${text}\n\n${hint}` }]
       },
     },

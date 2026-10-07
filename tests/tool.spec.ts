@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 
 import {
   buildLcuTools, capturePermissionHint, createComputerUseStopTool, decodeImage, extractText, imageDiagnostic,
+  stuckStopHint,
 } from '../src/tool.ts'
 import { STATIC_HOST_BUNDLE_IDS, enclosingAppBundle, isAgentHostApp } from '../src/host-guard.ts'
 
@@ -119,4 +120,21 @@ test('a refused capture becomes an instruction instead of a number', () => {
   assert.equal(capturePermissionHint('Illegal return statement'), undefined)
   assert.equal(capturePermissionHint('Computer Use was not approved to use Finder'), undefined)
   assert.equal(capturePermissionHint(''), undefined)
+})
+
+test('a latched Stop is answered with what actually clears it', () => {
+  const text = 'This application session has been explicitly stopped by the user for this turn. '
+    + 'Stop your work and send a final message noting they stopped the session and you\'re ready to '
+    + 'continue if they want you to. Computer Use can be used again in the next assistant turn.'
+  const hint = stuckStopHint(text)
+  // Retrying, js_reset and a new session all fail; only relaunching the app works.
+  assert.match(hint ?? '', /relaunch the ChatGPT application/i)
+  assert.match(hint ?? '', /will not help/i)
+
+  assert.equal(stuckStopHint('Computer Use was not approved to use Finder'), undefined)
+  assert.equal(stuckStopHint('Computer Use server error -10005: The screen capture failed.'), undefined)
+  assert.equal(stuckStopHint(''), undefined)
+
+  // The two hints never both claim the same failure.
+  assert.equal(capturePermissionHint(text), undefined)
 })
