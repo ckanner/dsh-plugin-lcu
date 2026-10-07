@@ -311,11 +311,17 @@ export function createComputerUseStopTool(
       + 'Call it with no arguments to list them, or with `app` set to one of the returned bundle '
       + 'identifiers to stop using it. This is what clears the host application\'s "computer use is '
       + 'active" state for an app without ending the session.',
+    // A whole JSON Schema object, exactly as the server's descriptors are
+    // carried: the harness rejects anything that is not `type: "object"`.
     parameters: {
-      app: {
-        type: 'string',
-        description: 'Bundle identifier from the listing to release. Omit to list instead.',
+      type: 'object',
+      properties: {
+        app: {
+          type: 'string',
+          description: 'Bundle identifier from the listing to release. Omit to list instead.',
+        },
       },
+      additionalProperties: false,
     },
     output: {
       schema: {

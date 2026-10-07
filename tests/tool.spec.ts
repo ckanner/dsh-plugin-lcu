@@ -10,7 +10,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { dirname, join } from 'node:path'
 
-import { decodeImage, extractText, imageDiagnostic } from '../src/tool.ts'
+import { buildLcuTools, createComputerUseStopTool, decodeImage, extractText, imageDiagnostic } from '../src/tool.ts'
 import { STATIC_HOST_BUNDLE_IDS, enclosingAppBundle, isAgentHostApp } from '../src/host-guard.ts'
 
 test('extractText joins text and never returns an empty string', () => {
@@ -68,4 +68,40 @@ test('the guard is disabled only by the documented override', async () => {
   } finally {
     delete process.env.LCU_ALLOW_AGENT_HOST_APPROVAL
   }
+})
+
+test('every tool the plugin registers declares a JSON-Schema object', () => {
+  // The harness rejects a tool whose `parameters` is not `type: "object"`, and it
+  // rejects it at request time — the whole turn fails. The server's descriptors
+  // are JSON Schemas already; a hand-written tool must match that shape rather
+  // than the descriptor *map* LCU uses on the wire.
+  // The two tools LCU promises the model; a server missing either is refused.
+  const serverTools = ['js', 'js_reset'].map((name) => ({
+    name,
+    description: 'server-owned',
+    inputSchema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+  }))
+  const connection = { modelTools: () => serverTools } as unknown as Parameters<typeof buildLcuTools>[0]
+  const ctx = { get: () => undefined } as unknown as Parameters<typeof buildLcuTools>[1]
+
+  const tools = [
+    ...buildLcuTools(connection, ctx),
+    createComputerUseStopTool(connection, () => 1),
+  ]
+  assert.equal(tools.length, 3)
+
+  for (const tool of tools) {
+    const parameters = tool.parameters as { type?: unknown; properties?: unknown } | undefined
+    assert.equal(parameters?.type, 'object', `${tool.name}: parameters must be a JSON Schema object`)
+    assert.equal(typeof parameters?.properties, 'object', `${tool.name}: properties must be present`)
+
+    const output = tool.output?.schema as { type?: unknown } | undefined
+    assert.equal(output?.type, 'object', `${tool.name}: output schema must be a JSON Schema object`)
+  }
+
+  // The hand-written tool keeps `app` optional: no arguments is the listing form.
+  const stop = tools[tools.length - 1]
+  const schema = stop.parameters as { required?: unknown, properties: Record<string, unknown> }
+  assert.equal(schema.required, undefined)
+  assert.ok('app' in schema.properties)
 })
