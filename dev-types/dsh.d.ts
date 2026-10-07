@@ -281,6 +281,18 @@ declare module '@deepseek-ai/cordis' {
       listener: (payload: { agent: Agent; turn: number; signal: AbortSignal }) => void | Promise<void>,
     ): () => void
     /**
+     * The per-step waterfall. Every turn opens it at step 1, which is where a
+     * plugin learns the active turn number; a listener must return `next()`'s
+     * decision unchanged.
+     */
+    on(
+      event: 'agent/pre-step',
+      listener: (
+        payload: { agent: Agent; turn: number; step: number; signal: AbortSignal },
+        next: () => Promise<unknown>,
+      ) => Promise<unknown>,
+    ): () => void
+    /**
      * The registry re-emits a session's committed preset choice. This fires
      * AFTER `agent/created`: a new task is created with the deployment default
      * and the picker's choice is applied on this event, so it is the only

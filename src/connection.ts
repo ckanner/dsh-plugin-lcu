@@ -70,6 +70,9 @@ const PROTOCOL_VERSION = '2025-06-18'
 const NO_APPROVAL_TIMEOUT_MS = 2 ** 31 - 1
 
 const DEFAULT_CALL_TIMEOUT_MS = 120_000
+/** The original host's control channel is bounded; 45 s matches LCU's own client. */
+const CONTROL_TIMEOUT_MS = 45_000
+const CONTROL_RESPONSE_LIMIT = 1024 * 1024
 const DEFAULT_TURN_END_TIMEOUT_MS = 120_000
 const CONNECT_TIMEOUT_MS = 120_000
 
@@ -209,6 +212,8 @@ export class LcuConnection {
   #closed = false
   #stderrBuffer = ''
   #activeCalls = new Set<AbortSignal>()
+  #controlDirectory: string | undefined
+  #controlSocketPath: string | undefined
 
   constructor(options: LcuConnectionOptions) {
     this.#options = options
@@ -218,6 +223,9 @@ export class LcuConnection {
   get instructions(): string {
     return this.#instructions
   }
+
+  /** The host session this connection serves, once bound. */
+  sessionId: string | undefined
 
   /** Server identity, for diagnostics. */
   get serverInfo(): { name?: string; version?: string } {
@@ -241,11 +249,33 @@ export class LcuConnection {
    */
   async connect(signal?: AbortSignal): Promise<void> {
     const { spawn } = await import('node:child_process')
+    // macOS only: the wrapper inside the runtime exposes an explicit per-app
+    // Stop over a private socket, which the host owns and passes down. Without
+    // it the only way to release an app is to end the whole connection.
+    this.#controlDirectory = undefined
+    this.#controlSocketPath = undefined
+    if (process.platform === 'darwin') {
+      try {
+        const { mkdtempSync, chmodSync } = await import('node:fs')
+        const { tmpdir } = await import('node:os')
+        const { join } = await import('node:path')
+        const directory = mkdtempSync(join(tmpdir(), 'dsh-lcu-'))
+        chmodSync(directory, 0o700)
+        this.#controlDirectory = directory
+        this.#controlSocketPath = join(directory, 'c.sock')
+      } catch {
+        this.#controlDirectory = undefined
+        this.#controlSocketPath = undefined
+      }
+    }
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...this.#options.env }
+    if (this.#controlSocketPath === undefined) delete childEnv.LCU_MAC_CONTROL_SOCKET
+    else childEnv.LCU_MAC_CONTROL_SOCKET = this.#controlSocketPath
     let child: import('node:child_process').ChildProcess
     try {
       child = spawn(this.#options.command, [...this.#options.args ?? []], {
         cwd: this.#options.cwd,
-        env: { ...process.env, ...this.#options.env },
+        env: childEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
       })
     } catch (error: unknown) {
@@ -311,6 +341,7 @@ export class LcuConnection {
     turnId: string,
     event: LcuTurnEndEvent = 'Stop',
   ): Promise<void> {
+    this.sessionId = sessionId
     if (sessionId === '' || turnId === '') {
       throw new LcuError('turn_ended', 'turn_ended requires a real session id and turn id')
     }
@@ -323,23 +354,161 @@ export class LcuConnection {
     if (failure !== undefined) throw failure
   }
 
-  /** Close the connection, terminating the child process. */
+  /**
+   * Close the connection and let the runtime tear itself down.
+   *
+   * Order matters: the server owns a process tree (the CUA kernel, its trusted
+   * worker, the macOS supervisor and the Sky helper), and LCU's supervisor exits
+   * when its lifetime socket closes. Closing stdin gives the server that
+   * orderly path; signalling first would orphan the tree on a machine that then
+   * keeps reporting computer use as active.
+   */
+  /** Whether this platform and connection expose the explicit per-app Stop. */
+  get hasHostControl(): boolean {
+    return this.#controlSocketPath !== undefined && !this.#closed
+  }
+
+  /**
+   * List the applications the runtime currently holds for one turn.
+   *
+   * @param sessionId - the real host session id.
+   * @param turnId - the real host turn id.
+   * @returns the active applications, with the names and bundle ids to stop by.
+   */
+  async controlStatus(
+    sessionId: string,
+    turnId: string,
+  ): Promise<readonly { name: string; bundleIdentifier: string }[]> {
+    const result = await this.#controlRequest({ type: 'status', session_id: sessionId, turn_id: turnId })
+    const applications = (result as { computerUse?: { activeApplications?: unknown } }).computerUse?.activeApplications
+    if (!Array.isArray(applications)) {
+      throw new LcuError('turn_ended', 'the original host returned an invalid Computer Use status')
+    }
+    return applications.flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) return []
+      const { name, bundleIdentifier } = entry as { name?: unknown; bundleIdentifier?: unknown }
+      if (typeof name !== 'string' || typeof bundleIdentifier !== 'string' || bundleIdentifier === '') return []
+      return [{ name, bundleIdentifier }]
+    })
+  }
+
+  /**
+   * Ask the original host to stop using one application for this turn.
+   *
+   * This is the documented way to release an app without ending the connection;
+   * the runtime then rejects further use of it until a later turn.
+   *
+   * @param sessionId - the real host session id.
+   * @param turnId - the real host turn id.
+   * @param app - the bundle identifier to stop.
+   */
+  async controlStop(sessionId: string, turnId: string, app: string): Promise<void> {
+    const result = await this.#controlRequest({ type: 'stop', session_id: sessionId, turn_id: turnId, app }) as {
+      accepted?: unknown
+      applicationId?: unknown
+    }
+    if (result.accepted !== true || result.applicationId !== app) {
+      throw new LcuError('turn_ended', `the original host did not confirm Stop for ${app}`)
+    }
+  }
+
+  /** Open the control socket, send one newline-delimited request, await its answer. */
+  async #controlRequest(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const socketPath = this.#controlSocketPath
+    if (socketPath === undefined || this.#closed) {
+      throw new LcuError('turn_ended', 'the macOS Computer Use control endpoint is unavailable')
+    }
+    const { createConnection } = await import('node:net')
+    return await new Promise<Record<string, unknown>>((resolve, reject) => {
+      let buffer = ''
+      let settled = false
+      const finish = (error: Error | undefined, value?: Record<string, unknown>): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        socket.destroy()
+        if (error !== undefined) reject(error)
+        else resolve(value ?? {})
+      }
+      const timer = setTimeout(
+        () => { finish(new LcuError('turn_ended', 'the Computer Use control request timed out')) },
+        CONTROL_TIMEOUT_MS,
+      )
+      const socket = createConnection(socketPath)
+      socket.on('error', (error: Error) => { finish(new LcuError('turn_ended', `control connection failed: ${error.message}`)) })
+      socket.on('connect', () => { socket.write(`${JSON.stringify(request)}\n`) })
+      socket.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf8')
+        if (Buffer.byteLength(buffer, 'utf8') > CONTROL_RESPONSE_LIMIT) {
+          finish(new LcuError('turn_ended', 'the Computer Use control response exceeded its size limit'))
+          return
+        }
+        const newline = buffer.indexOf('\n')
+        if (newline < 0) return
+        try {
+          const response = JSON.parse(buffer.slice(0, newline)) as { ok?: unknown; error?: unknown; result?: unknown }
+          if (typeof response !== 'object' || response === null || typeof response.ok !== 'boolean') {
+            throw new Error('invalid response shape')
+          }
+          if (response.ok !== true) {
+            finish(new LcuError('turn_ended', typeof response.error === 'string' ? response.error : 'the host refused the control request'))
+            return
+          }
+          const value = typeof response.result === 'object' && response.result !== null
+            ? response.result as Record<string, unknown>
+            : {}
+          finish(undefined, value)
+        } catch (error: unknown) {
+          finish(new LcuError('turn_ended', `invalid Computer Use control response: ${error instanceof Error ? error.message : String(error)}`))
+        }
+      })
+      socket.on('end', () => { finish(new LcuError('turn_ended', 'the Computer Use control connection ended before a response')) })
+    })
+  }
+
+  /** Release the private control directory once the child is gone. */
+  #removeControlDirectory(): void {
+    const directory = this.#controlDirectory
+    this.#controlDirectory = undefined
+    this.#controlSocketPath = undefined
+    if (directory === undefined) return
+    void import('node:fs').then(({ rmSync }) => { rmSync(directory, { recursive: true, force: true }) }).catch(() => {})
+  }
+
   async close(): Promise<void> {
     this.#closed = true
     this.#failAll(new LcuError('spawn', 'connection closed'))
     const child = this.#child
     this.#child = undefined
-    if (child === undefined || child.exitCode !== null) return
+    if (child === undefined || child.exitCode !== null) {
+      this.#removeControlDirectory()
+      return
+    }
+    try {
+      child.stdin?.end()
+    } catch {
+      // A already-broken stdin just means we fall through to signalling.
+    }
+    if (await this.#exited(child, 5_000)) return
     child.kill('SIGTERM')
-    await new Promise<void>((resolve) => {
+    if (await this.#exited(child, 3_000)) return
+    child.kill('SIGKILL')
+    await this.#exited(child, 2_000)
+  }
+
+  /** Resolve `true` once the child has exited, or `false` after `timeoutMs`. */
+  #exited(child: import('node:child_process').ChildProcess, timeoutMs: number): Promise<boolean> {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+    return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
-        child.kill('SIGKILL')
-        resolve()
-      }, 3_000)
-      child.once('exit', () => {
+        child.removeListener('exit', onExit)
+        resolve(false)
+      }, timeoutMs)
+      const onExit = (): void => {
         clearTimeout(timer)
-        resolve()
-      })
+        resolve(true)
+      }
+      child.once('exit', onExit)
     })
   }
 

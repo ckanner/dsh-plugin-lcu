@@ -287,6 +287,79 @@ export function buildLcuTools(
 }
 
 /**
+ * The explicit per-app release, which LCU exposes to a host rather than to the
+ * model.
+ *
+ * LCU's own adapters surface this as a user command (`/lcu stop`), because
+ * releasing an app is a user's decision. In DSH the equivalent user action is
+ * asking the agent, so this is the one tool this plugin adds on top of the
+ * server's contract. Called without `app` it reports what is held.
+ *
+ * @param connection - the agent's connected runtime.
+ * @param currentTurn - resolves the agent's active turn, or `undefined` outside one.
+ * @returns a registrable tool definition.
+ */
+export function createComputerUseStopTool(
+  connection: LcuConnection,
+  currentTurn: () => number | undefined,
+): ToolDefinition {
+  const toolName = 'computer_use_stop'
+  return {
+    name: toolName,
+    description:
+      'List or release the applications the computer-use runtime currently holds for this session. '
+      + 'Call it with no arguments to list them, or with `app` set to one of the returned bundle '
+      + 'identifiers to stop using it. This is what clears the host application\'s "computer use is '
+      + 'active" state for an app without ending the session.',
+    parameters: {
+      app: {
+        type: 'string',
+        description: 'Bundle identifier from the listing to release. Omit to list instead.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          activeApplications: { type: 'array', items: {} },
+          stopped: {},
+        },
+        required: ['activeApplications'],
+        additionalProperties: false,
+      },
+      render(_args: unknown, value: unknown) {
+        const record = isRecord(value) ? value : {}
+        const apps = Array.isArray(record.activeApplications) ? record.activeApplications as { name: string; bundleIdentifier: string }[] : []
+        const lines = apps.length === 0
+          ? ['No application is currently held by computer use.']
+          : apps.map((app) => `- ${app.name} (${app.bundleIdentifier})`)
+        const stopped = typeof record.stopped === 'string' ? [`Stopped: ${record.stopped}`] : []
+        return [{ type: 'text', text: [...stopped, ...lines].join('\n') }]
+      },
+    },
+    async execute(args: unknown): Promise<unknown> {
+      const turn = currentTurn()
+      if (turn === undefined) {
+        throw new Error('no active turn: computer use is released between turns')
+      }
+      const sessionId = connection.sessionId
+      if (sessionId === undefined) throw new Error('this runtime is not bound to a session')
+      const requested = isRecord(args) && typeof args.app === 'string' ? args.app : undefined
+      const activeApplications = await connection.controlStatus(sessionId, String(turn))
+      if (requested === undefined) return { activeApplications }
+      const target = activeApplications.find((app) => app.bundleIdentifier === requested)
+        ?? activeApplications.find((app) => app.name === requested)
+      if (target === undefined) {
+        throw new Error(`computer use is not holding "${requested}"; held: `
+          + (activeApplications.map((app) => app.bundleIdentifier).join(', ') || 'nothing'))
+      }
+      await connection.controlStop(sessionId, String(turn), target.bundleIdentifier)
+      return { activeApplications, stopped: target.bundleIdentifier }
+    },
+  }
+}
+
+/**
  * Register the model-facing tools in one agent's scope.
  *
  * Registration is per agent rather than at plugin mount because the server owns
@@ -302,9 +375,13 @@ export function registerLcuTools(
   agentCtx: Context,
   connection: LcuConnection,
   ctx: Context,
-  options: LcuToolOptions = {},
+  options: LcuToolOptions & { readonly currentTurn?: () => number | undefined } = {},
 ): () => void {
-  const disposers = buildLcuTools(connection, ctx, options).map((definition) => agentCtx.tools.register(definition))
+  const definitions = buildLcuTools(connection, ctx, options)
+  if (options.currentTurn !== undefined) {
+    definitions.push(createComputerUseStopTool(connection, options.currentTurn))
+  }
+  const disposers = definitions.map((definition) => agentCtx.tools.register(definition))
   return () => {
     for (const dispose of disposers.reverse()) dispose()
   }

@@ -36,6 +36,12 @@ LCU 从不解包、下载、认证或改写它。
 另有两个 host-only 工具只对宿主可见、**绝不暴露给模型**：`turn_ended`（每轮清理）与
 `js_add_node_module_dir`。
 
+插件自己**只加一个**工具：
+
+| 工具 | 作用 |
+|---|---|
+| `computer_use_stop` | 不带参数时列出运行时当前为本次会话持有的应用；带 `app`（上面列出的 bundle identifier）时释放它。这就是 LCU 的显式按应用 Stop —— 它的 Pi adapter 把它暴露为 `/lcu stop` —— 能在**不结束会话**的前提下清掉宿主应用里"computer use 正在使用"的状态。 |
+
 截图会作为**持久化图片**经 DSH 的 attachment store 送达 —— 所以声明了 image input 的模型路由是真的能"看见"屏幕的。
 
 ## 前置条件
@@ -245,6 +251,8 @@ harness 没有当前会话可读的插件日志出口，而失败的 `agent/crea
 | 一轮之后调用被挡住 | 运行时的一轮清理尚未结束；插件会在下次调用前重试，未成功前拒绝调用。 |
 | `lcu doctor` 报 socket 路径错误 | 签名助手把 socket 绑在 home 目录下，路径超过 103 字节会被拒。换一个 home 路径更短的账号。 |
 | attach 报 spawn 失败 | 直接跑 `~/.local/share/lcu/current/bin/lcu doctor`，再检查配置里的 `command`。 |
+| ChatGPT 里仍显示某个应用在用 computer use | 运行时还持有它。让 agent 调 `computer_use_stop`，或直接关掉那个会话 —— 连接持有整棵运行时进程树，关闭时会一并释放。 |
+| `lcu status` 报 `changed_since_install` | ChatGPT 应用在会话运行期间自我更新了。LCU 警告这种会话可能"混用新旧文件"：停掉这些会话并重启 harness，让所有东西来自同一个 app 版本。 |
 
 `node scripts/probe-lcu.mjs` 不经 harness 直连 LCU，打印协议版本、服务端身份、instructions 长度与工具清单 ——
 用来把「插件的问题」和「LCU 的问题」分开。

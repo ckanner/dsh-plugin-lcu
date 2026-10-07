@@ -38,6 +38,12 @@ Two model-facing tools, exactly as LCU defines them — this plugin does not inv
 Two host-only tools stay reachable by the plugin and are **never** shown to the model:
 `turn_ended` (per-turn cleanup) and `js_add_node_module_dir`.
 
+The plugin adds exactly one tool of its own:
+
+| Tool | What it does |
+|---|---|
+| `computer_use_stop` | With no argument, list the applications the runtime currently holds for this session. With `app` set to one of their bundle identifiers, release it. This is LCU's explicit per-app Stop — the same action its Pi adapter surfaces as `/lcu stop` — which clears the host application's "computer use is active" state for an app without ending the session. |
+
 Screenshots arrive as durable images through DSH's attachment store, so a model route that declares
 image input can actually look at the screen.
 
@@ -263,6 +269,8 @@ otherwise swallowed silently.
 | Calls blocked after a turn | The runtime's turn cleanup had not settled; the plugin retries it before the next call and refuses until it does. |
 | `lcu doctor` reports a socket-path error | The signed helper binds under your home folder and refuses a path over 103 bytes. Use an account with a shorter home path. |
 | Attach fails with a spawn error | Run `~/.local/share/lcu/current/bin/lcu doctor` directly, then check `command` in the config. |
+| The ChatGPT app still shows computer use on an app | The runtime is still holding it. Ask for `computer_use_stop`, or close the session — the connection owns the runtime process tree and releases it on the way out. |
+| `lcu status` reports `changed_since_install` | The ChatGPT app updated underneath a running session. LCU warns that such a session can run "a mix of old and new files": stop those sessions and restart the harness so everything comes from one app version. |
 
 `node scripts/probe-lcu.mjs` talks to LCU with no harness involved and prints the protocol version,
 server identity, instructions length and the tool list — useful to separate a plugin problem from an

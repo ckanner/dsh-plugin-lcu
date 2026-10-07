@@ -103,6 +103,8 @@ export function apply(ctx: Context, config: Config): void {
     readonly connection: LcuConnection
     /** Explicitly `| undefined` so the gate can be cleared under exactOptionalPropertyTypes. */
     pendingCleanup?: { readonly sessionId: string; readonly turnId: string } | undefined
+    /** The turn this Agent is currently inside, tracked from the step pipeline. */
+    turn?: number | undefined
   }
   const connections = new Map<Agent, Attached>()
   diag(`apply: presets=${JSON.stringify(settings.presets)} command=${settings.command} args=${JSON.stringify(settings.args)}`)
@@ -221,6 +223,9 @@ export function apply(ctx: Context, config: Config): void {
     }
     diag(`  attach: connected, server=${describe(connection.serverInfo)} tools=${JSON.stringify(connection.allTools.map((t) => t.name))} instructions=${String(connection.instructions.length)}B`)
     const state: Attached = { connection }
+    // The runtime binds approvals and the per-app Stop to a real session and
+    // turn, so the connection carries the session identity from the start.
+    connection.sessionId = String(agent.id)
     connections.set(agent, state)
 
     // Everything below is agent-scoped: it unwinds when the Agent is disposed.
@@ -231,6 +236,7 @@ export function apply(ctx: Context, config: Config): void {
 
     try {
       registerLcuTools(agent.ctx, connection, ctx, {
+        currentTurn: () => state.turn,
         beforeCall: async () => {
           const pending = state.pendingCleanup
           if (pending === undefined) return
@@ -314,6 +320,16 @@ export function apply(ctx: Context, config: Config): void {
       return
     }
     diag(`  -> attach done, connections=${String(connections.size)}, tools=${JSON.stringify(agent.ctx.tools.schemas(agent).map((t) => t.name).slice(-4))}`)
+  })
+
+  // LCU binds its approvals and its explicit per-app Stop to a real turn, and
+  // nothing else hands us the number: the first step of each turn opens the
+  // waterfall, so record it there and pass it through untouched.
+  ctx.on('agent/pre-step', async ({ agent, turn }, next) => {
+    const decision = await next()
+    const state = connections.get(agent)
+    if (state !== undefined) state.turn = turn
+    return decision
   })
 
   // LCU's lifecycle contract: the runtime owns per-turn cleanup (native helper

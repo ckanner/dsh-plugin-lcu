@@ -129,6 +129,24 @@ test('classifies a failed turn cleanup instead of ignoring it', () => {
   assert.match(silent?.message ?? '', /unknown error/)
 })
 
+test('the macOS control channel is advertised only when it exists', { skip }, async () => {
+  const connection = new LcuConnection({ command: LCU })
+  try {
+    await connection.connect()
+    if (process.platform !== 'darwin') {
+      assert.equal(connection.hasHostControl, false)
+      return
+    }
+    // The host owns the socket and passes it down; a connection that never
+    // created one must say so rather than fail a call opaquely.
+    assert.equal(connection.hasHostControl, true)
+    // A status query is scoped to a real session and turn.
+    await assert.rejects(() => connection.controlStatus('', ''), /./)
+  } finally {
+    await connection.close()
+  }
+})
+
 test('turn_ended refuses synthetic identifiers', { skip }, async () => {
   const connection = new LcuConnection({ command: LCU })
   try {
