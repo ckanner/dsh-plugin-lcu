@@ -26,6 +26,8 @@ import {
   LcuConnection, LcuError, TURN_CLEANUP_TIMEOUT_CODE, resolveElicitation,
   type LcuElicitationRequest, type LcuElicitationResponse,
 } from './connection.ts'
+import { randomUUID } from 'node:crypto'
+
 import { diag, describe } from './diag.ts'
 import { isAgentHostApp } from './host-guard.ts'
 import { registerLcuTools } from './tool.ts'
@@ -103,8 +105,15 @@ export function apply(ctx: Context, config: Config): void {
     readonly connection: LcuConnection
     /** Explicitly `| undefined` so the gate can be cleared under exactOptionalPropertyTypes. */
     pendingCleanup?: { readonly sessionId: string; readonly turnId: string } | undefined
-    /** The turn this Agent is currently inside, tracked from the step pipeline. */
-    turn?: number | undefined
+    /** The turn number last seen from the step pipeline, for change detection only. */
+    turnNumber?: number | undefined
+    /**
+     * A fresh identity for that turn, which is what the runtime actually keys its
+     * per-turn state by. It must be unique across sessions: an ordinal restarts
+     * at 1 in every session, so reusing one makes the runtime treat a new turn as
+     * the previous session's already-finished turn.
+     */
+    turnId?: string | undefined
   }
   const connections = new Map<Agent, Attached>()
   diag(`apply: presets=${JSON.stringify(settings.presets)} command=${settings.command} args=${JSON.stringify(settings.args)}`)
@@ -236,7 +245,7 @@ export function apply(ctx: Context, config: Config): void {
 
     try {
       registerLcuTools(agent.ctx, connection, ctx, {
-        currentTurn: () => state.turn,
+        currentTurn: () => state.turnId,
         beforeCall: async () => {
           const pending = state.pendingCleanup
           if (pending === undefined) return
@@ -328,7 +337,10 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('agent/pre-step', async ({ agent, turn }, next) => {
     const decision = await next()
     const state = connections.get(agent)
-    if (state !== undefined) state.turn = turn
+    if (state !== undefined && state.turnNumber !== turn) {
+      state.turnNumber = turn
+      state.turnId = randomUUID()
+    }
     return decision
   })
 
@@ -340,7 +352,9 @@ export function apply(ctx: Context, config: Config): void {
     diag(`agent/turn-stopping id=${String(agent.id)} turn=${String(turn)} aborted=${String(signal.aborted)} haveConnection=${String(state !== undefined)}`)
     if (state === undefined) return
     const sessionId = String(agent.id)
-    const turnId = String(turn)
+    // The identity minted for this turn, never the ordinal.
+    const turnId = state.turnId
+    if (turnId === undefined) return
     try {
       await state.connection.turnEnded(sessionId, turnId, signal.aborted ? 'Interrupt' : 'Stop')
       state.pendingCleanup = undefined

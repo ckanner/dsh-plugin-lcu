@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-lcu",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Drive the desktop and Chrome from DeepSeek Harness through LCU (Codex computer use, decoupled from the app).",
   "keywords": [
     "dsh-plugin",

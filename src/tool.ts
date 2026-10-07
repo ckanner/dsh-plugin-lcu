@@ -193,10 +193,11 @@ export interface LcuToolOptions {
    */
   readonly beforeCall?: () => Promise<void>
   /**
-   * The Agent's active turn, so calls carry the identities the runtime keys its
-   * approvals, per-turn Stop and cleanup by.
+   * The Agent's active turn identity, so calls carry what the runtime keys its
+   * approvals, per-turn Stop and cleanup by. A unique id per turn, never an
+   * ordinal: the runtime treats a repeated id as the same, already-ended turn.
    */
-  readonly currentTurn?: () => number | undefined
+  readonly currentTurn?: () => string | undefined
 }
 
 /**
@@ -247,7 +248,7 @@ export function createLcuTool(
       const turn = options.currentTurn?.()
       const result = await connection.callTool(toolName, callArgs, {
         signal: exec.signal,
-        ...(turn === undefined ? {} : { turnId: String(turn) }),
+        ...(turn === undefined ? {} : { turnId: turn }),
         ...(exec.callId === undefined || exec.callId === '' ? {} : { callId: exec.callId }),
       })
       const content = result.content
@@ -311,7 +312,7 @@ export function buildLcuTools(
  */
 export function createComputerUseStopTool(
   connection: LcuConnection,
-  currentTurn: () => number | undefined,
+  currentTurn: () => string | undefined,
 ): ToolDefinition {
   const toolName = 'computer_use_stop'
   return {
@@ -361,7 +362,7 @@ export function createComputerUseStopTool(
       const sessionId = connection.sessionId
       if (sessionId === undefined) throw new Error('this runtime is not bound to a session')
       const requested = isRecord(args) && typeof args.app === 'string' ? args.app : undefined
-      const activeApplications = await connection.controlStatus(sessionId, String(turn))
+      const activeApplications = await connection.controlStatus(sessionId, turn)
       if (requested === undefined) return { activeApplications }
       const target = activeApplications.find((app) => app.bundleIdentifier === requested)
         ?? activeApplications.find((app) => app.name === requested)
@@ -369,7 +370,7 @@ export function createComputerUseStopTool(
         throw new Error(`computer use is not holding "${requested}"; held: `
           + (activeApplications.map((app) => app.bundleIdentifier).join(', ') || 'nothing'))
       }
-      await connection.controlStop(sessionId, String(turn), target.bundleIdentifier)
+      await connection.controlStop(sessionId, turn, target.bundleIdentifier)
       return { activeApplications, stopped: target.bundleIdentifier }
     },
   }
