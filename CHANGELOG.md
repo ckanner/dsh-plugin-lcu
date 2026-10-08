@@ -1,6 +1,19 @@
 # Changelog
 
+## 0.3.5
+
+Diagnostics only — no behaviour change.
+
+`onDiag` existed on the connection and nothing passed it, so the control channel's decisions never reached the
+diagnostic log. The client maps "no runtime service is connected" and "nothing is held" to the same empty list,
+and only the connection knows which happened, so a `computer_use_stop` that found nothing was indistinguishable
+in the log from one whose channel was never up.
+
+Found by reading a real session's log after a successful browser and computer-use test: the control channel had
+been working there the whole time, and there was no line to say so.
+
 ## 0.3.4
+
 
 **The plugin no longer installs, invokes or depends on LCU.** It locates and validates the ChatGPT application
 itself, builds the environment the computer-use runtime expects, and starts the application's own entry point.
