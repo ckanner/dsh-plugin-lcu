@@ -229,7 +229,8 @@ export function storedImageNote(paths: readonly string[]): string | undefined {
   const list = paths.map((path) => `  ${path}`).join('\n')
   return `The harness stored ${paths.length === 1 ? 'this image' : 'these images'} on the host filesystem:\n${list}\n`
     + 'The JavaScript sandbox cannot write files (fs writes fail with EPERM), so to place a copy in '
-    + 'the workspace use bash, for example: `cp \'<path>\' ./screenshot.jpg`.'
+    + 'the workspace use bash. The store keeps its objects mode 400, so set the mode as you copy '
+    + "or the result is unreadable: `install -m 644 '<path>' ./screenshot.jpg`."
 }
 
 /**

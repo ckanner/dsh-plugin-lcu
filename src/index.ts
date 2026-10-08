@@ -51,7 +51,8 @@ const LCU_HOST_NOTE = [
   '- `js` runs in a sandbox that cannot write files anywhere (writes fail with EPERM, including in the',
   '  temporary directory). Do not try to save with `fs`; it will not work.',
   '- Screenshots are delivered to the harness as images, and every stored image reports its host',
-  "  filesystem path in the tool result. To put a copy in the workspace, use bash: `cp '<path>' <target>`.",
+  '  filesystem path in the tool result. To put a copy in the workspace use bash, setting the mode as',
+  "  you copy: `install -m 644 '<path>' <target>`. A plain `cp` leaves the mode 400 object unreadable.",
   '- Anything the sandbox cannot do — writing files, reading the host filesystem — is available through',
   '  the `bash` tool instead.',
 ].join('\n')

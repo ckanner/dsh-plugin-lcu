@@ -147,7 +147,10 @@ test('a stored screenshot comes back with a path the model can act on', () => {
   const note = storedImageNote(['/Users/x/.dsh/attachments/v1/objects/de/de9ecfb6'])
   assert.match(note ?? '', /\/Users\/x\/\.dsh\/attachments\/v1\/objects\/de\/de9ecfb6/)
   assert.match(note ?? '', /EPERM/)
-  assert.match(note ?? '', /cp /)
+  // The store's objects are mode 400, so the note names a copy that sets the mode:
+  // a plain `cp` produced an unreadable file and cost the model an extra call.
+  assert.match(note ?? '', /install -m 644/)
+  assert.match(note ?? '', /mode 400/)
   assert.match(note ?? '', /bash/)
 
   // Plurals and the empty case.
