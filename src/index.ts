@@ -148,7 +148,8 @@ export function apply(ctx: Context, config: Config): void {
     turnId?: string | undefined
   }
   const connections = new Map<Agent, Attached>()
-  diag(`apply: presets=${JSON.stringify(settings.presets)} command=${settings.command} args=${JSON.stringify(settings.args)}`)
+  diag(`apply: presets=${JSON.stringify(settings.presets)} command=${settings.command} args=${JSON.stringify(settings.args)}`
+    + ` allowedApps=${JSON.stringify([...settings.allowedApps])} allowedOrigins=${JSON.stringify([...settings.allowedOrigins])}`)
   diag(`  services: agentPresets=${describe(ctx.get('agentPresets'))} userQuestions=${describe(ctx.get('userQuestions'))} computerUse=${describe(ctx.get('computerUse'))} attachments=${describe(ctx.get('attachments'))} llm=${describe(ctx.get('llm'))}`)
 
   // Reserve the deployment's computer-use provider slot when the seam exists.
