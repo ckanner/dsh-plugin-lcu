@@ -186,6 +186,7 @@ config:
 | `audio` | `false` | 传 `--audio`，启用运行时的电脑录音 API。 |
 | `presets` | `["heavy"]` | 允许拿到工具的 Agent preset id 列表。 |
 | `allowedOrigins` | `[]` | 免问询的精确 HTTP(S) origin。非法项直接丢弃，**绝不放宽**。 |
+| `allowedApps` | `[]` | 免问询可使用的 bundle identifier 列表。**承载 agent 的应用即使被列进去也会被拒**。 |
 | `sectionOrder` | `0` | 注入的 LCU instructions 在 prompt 中的排序。 |
 
 ## 批准与安全模型
@@ -203,6 +204,28 @@ config:
   而运行时把 cancel 当作拒绝。
 
 LCU 自身不保留权限缓存；`Always allow` 是**运行时**按应用记住的。
+
+### 无人值守
+
+每个批准都是人的决定，而**没人回答就等于拒绝**——运行时不会默认放行。
+所以无人值守的运行必须**把两半都提前决定好**：
+
+```yaml
+config:
+  allowedApps:
+    - com.google.Chrome        # 免问询使用这个应用
+  allowedOrigins:
+    - https://example.com      # 免问询访问这个精确 origin
+```
+
+- `allowedApps` 按 bundle identifier 匹配，大小写不敏感。**承载 agent 的应用在查列表之前就被拒**，
+  所以任何条目都无法授权它。
+- `allowedOrigins` 只做精确 origin 匹配；带路径、带尾部斜杠、大小写不同都算另一个 origin，仍会去问。
+- 未列出的仍会问，而没人在场就是拒绝。
+
+诊断日志会记下**每一个被问到的应用与 origin**
+（`approval: site https://example.com asking (add it to allowedOrigins to skip this)`），
+这是发现该填什么值的最省事办法。
 
 ## 实现说明
 

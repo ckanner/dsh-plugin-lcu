@@ -6,11 +6,14 @@
  * request can be malformed, and every answer that must not be forwarded.
  */
 
+import { isAgentHostApp } from '../src/host-guard.ts'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
   approvalValueForLabel,
+  isPreApprovedApp,
+  normalizeApps,
   isPreApprovedOrigin,
   nativeAppApproval,
   nativeAppApprovalResponse,
@@ -136,4 +139,32 @@ test('recognizes only an exact HTTP(S) site origin', () => {
   assert.deepEqual([...allowed], ['https://example.com'])
   assert.equal(isPreApprovedOrigin(origin('https://example.com'), allowed), true)
   assert.equal(isPreApprovedOrigin(origin('https://other.com'), allowed), false)
+})
+
+test('an application can be pre-approved, but never the agent host', async () => {
+  // Unattended runs depend on this: the runtime asks before it first uses each
+  // application, and an unanswered question is a refusal.
+  const apps = normalizeApps([' com.google.Chrome ', 'COM.APPLE.FINDER', '', '  '])
+  assert.deepEqual([...apps].sort(), ['com.apple.finder', 'com.google.chrome'])
+
+  // The application arrives in `_meta.tool_params.app`; the helper's second
+  // argument spreads at the top level, so name the field explicitly.
+  const withApp = (app: string): LcuElicitationRequest => request({
+    _meta: { codex_approval_kind: 'mcp_tool_call', connector_id: 'computer-use', tool_params: { app } },
+  } as Partial<LcuElicitationRequest>)
+
+  const chrome = nativeAppApproval(withApp('com.google.Chrome'))
+  assert.ok(chrome)
+  assert.equal(isPreApprovedApp(chrome, apps), true)
+  assert.equal(isPreApprovedApp(chrome, normalizeApps([])), false)
+  assert.equal(isPreApprovedApp(chrome, normalizeApps(['com.apple.Safari'])), false)
+  // Nothing is admitted by a malformed entry.
+  assert.equal(isPreApprovedApp(chrome, normalizeApps([''])), false)
+
+  // The guard is checked before any allowlist, so listing the agent's own host
+  // cannot authorize it. The order is what matters, and index.ts places the
+  // guard first; this records the host that must never pass.
+  const host = nativeAppApproval(withApp('com.deepseek.dsh'))
+  assert.ok(host)
+  assert.equal(await isAgentHostApp(host.resource), true)
 })

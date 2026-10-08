@@ -197,6 +197,7 @@ Open Safari, go to example.com and read the page title.
 | `audio` | `false` | Pass `--audio` to enable the runtime's computer-audio API. |
 | `presets` | `["heavy"]` | Agent preset ids whose sessions get the tools. |
 | `allowedOrigins` | `[]` | Exact HTTP(S) origins answered without asking. Invalid entries are dropped, never widened. |
+| `allowedApps` | `[]` | Bundle identifiers computer use may use without asking. The application hosting the agent is refused even when it is listed here. |
 | `sectionOrder` | `0` | Prompt section order for the injected LCU instructions. |
 
 ## Approvals and the security model
@@ -216,6 +217,31 @@ The model cannot approve anything. Every decision is a person's:
   aborted call all end as *cancel*, which the runtime treats as a refusal.
 
 LCU keeps no permission cache of its own; `Always allow` is remembered by the runtime, per app.
+
+### Unattended operation
+
+Every approval belongs to a person, and an unanswered question is a **refusal** —
+the runtime does not default to granting. A run with nobody at the keyboard
+therefore has to have both halves already decided:
+
+```yaml
+config:
+  allowedApps:
+    - com.google.Chrome        # use this application without asking
+  allowedOrigins:
+    - https://example.com      # and reach this exact origin without asking
+```
+
+- `allowedApps` is matched against the bundle identifier, case-insensitively. The
+  application hosting the agent is refused **before** the list is consulted, so no
+  entry can authorize it.
+- `allowedOrigins` matches an exact origin only; a path, a trailing slash or
+  different case is a different origin and is still asked.
+- Anything not listed is asked, and with nobody there it is declined.
+
+The diagnostic log names every application and origin that was asked
+(`approval: site https://example.com asking (add it to allowedOrigins to skip this)`),
+which is how to discover the exact values a run needs.
 
 ## Understand the implementation
 

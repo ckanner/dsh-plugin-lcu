@@ -21,7 +21,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ComputerUseProviderName } from '@deepseek-ai/dsh-computer-use'
 
-import { approvalValueForLabel, isPreApprovedOrigin, nativeAppApproval, nativeAppApprovalResponse, normalizeOrigins, originApprovalOrigin } from './approval.ts'
+import {
+  approvalValueForLabel, isPreApprovedApp, isPreApprovedOrigin, nativeAppApproval,
+  nativeAppApprovalResponse, normalizeApps, normalizeOrigins, originApprovalOrigin,
+} from './approval.ts'
 import {
   LcuConnection, LcuError, TURN_CLEANUP_TIMEOUT_CODE, resolveElicitation,
   type LcuElicitationRequest, type LcuElicitationResponse,
@@ -78,6 +81,14 @@ export interface Config {
   presets?: string[]
   /** Exact HTTP(S) origins pre-approved for browser access, never widened. */
   allowedOrigins?: string[]
+  /**
+   * Bundle identifiers computer use may use without asking.
+   *
+   * The runtime asks before it first uses each application, and an unanswered
+   * question is a refusal, so an unattended run needs its targets listed here.
+   * The application hosting the agent can never be admitted this way.
+   */
+  allowedApps?: string[]
   /** Prompt section order for the injected LCU instructions. */
   sectionOrder?: number
 }
@@ -88,6 +99,7 @@ interface Settings {
   readonly args: readonly string[]
   readonly presets: readonly string[]
   readonly allowedOrigins: ReadonlySet<string>
+  readonly allowedApps: ReadonlySet<string>
   readonly sectionOrder: number
 }
 
@@ -103,6 +115,7 @@ function resolveSettings(config: Config): Settings {
     args,
     presets: config.presets ?? ['heavy'],
     allowedOrigins: normalizeOrigins(config.allowedOrigins ?? []),
+    allowedApps: normalizeApps(config.allowedApps),
     sectionOrder: config.sectionOrder ?? DEFAULT_SECTION_ORDER,
   }
 }
@@ -165,11 +178,17 @@ export function apply(ctx: Context, config: Config): void {
 
     const approval = approval0
     if (approval !== undefined) {
-      // Anti-self-approval: never let the agent approve its own host.
+      // Anti-self-approval first, and unconditionally: a configured allowlist
+      // must never be able to authorize the agent's own host.
       if (await isAgentHostApp(approval.resource)) {
         diag(`  approval: REFUSED agent-host app ${approval.resource}`)
         ctx.logger.warn(`lcu: refusing to approve the app hosting this agent (${approval.resource})`)
         return { action: 'decline' }
+      }
+      // The already-decided case, which is what an unattended run depends on.
+      if (isPreApprovedApp(approval, settings.allowedApps)) {
+        diag(`  approval: app ${approval.resource} pre-approved by allowedApps`)
+        return { action: 'accept', content: {} }
       }
       try {
         const answer = await questions.ask({

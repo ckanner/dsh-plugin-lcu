@@ -115,6 +115,49 @@ export function approvalValueForLabel(approval: NativeAppApproval, label: string
   return approval.choices.find((choice) => choice.label === label)?.value ?? 'cancel'
 }
 
+/**
+ * Normalize the pre-approved application bundle identifiers.
+ *
+ * Matching is case-insensitive because a bundle identifier's case is an
+ * implementation detail of the application's Info.plist, and a user reading it
+ * out of a log should not have to reproduce it exactly. Entries are otherwise
+ * kept verbatim: nothing here widens what a match admits.
+ *
+ * @param raw - configured identifiers, possibly absent or malformed.
+ * @returns the normalized set.
+ */
+export function normalizeApps(raw: readonly string[] | undefined): ReadonlySet<string> {
+  const apps = new Set<string>()
+  for (const entry of raw ?? []) {
+    if (typeof entry !== 'string') continue
+    const value = entry.trim().toLowerCase()
+    // An empty entry would match nothing but reads like a grant; drop it.
+    if (value === '') continue
+    apps.add(value)
+  }
+  return apps
+}
+
+/**
+ * Whether the user has already decided about this application.
+ *
+ * This is what makes an unattended run possible: without it the runtime asks
+ * before it first uses each application, and an unanswered question is a refusal.
+ * It is checked only after the agent-host guard, so a list can never authorize
+ * the application the agent itself is running in.
+ *
+ * @param approval - the application approval the runtime sent.
+ * @param allowedApps - normalized pre-approved identifiers.
+ * @returns whether the application may be admitted without asking.
+ */
+export function isPreApprovedApp(
+  approval: NativeAppApproval,
+  allowedApps: ReadonlySet<string>,
+): boolean {
+  if (allowedApps.size === 0) return false
+  return allowedApps.has(approval.resource.trim().toLowerCase())
+}
+
 /** The exact origin a browser-site approval names, when it names one. */
 export function originApprovalOrigin(request: LcuElicitationRequest): string | undefined {
   const meta = asObject(request._meta) ?? asObject((request as Json).meta)

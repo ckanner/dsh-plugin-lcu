@@ -19,5 +19,10 @@
         presets:
           - heavy
         chrome: true
+        # Approvals are a person's, and an unanswered question is a refusal, so an
+        # unattended run needs both halves decided here. The diagnostic log names
+        # every application and origin that was asked, which is how to find them.
+        # allowedApps:
+        #   - com.google.Chrome
         # allowedOrigins:
         #   - http://localhost:3000
