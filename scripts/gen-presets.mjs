@@ -53,7 +53,11 @@ const PRESETS = {
     description: '日常编码：PTC 程序化工具调用 + Codex 委派',
     order: 5,
     presentation: null, // keep the base's `ptc`
-    enable: ['tool-subagent-codex'],
+    // Nothing to enable. The base ships `tool-subagent-codex` disabled, and it
+    // stays that way: `dsh-subagent-codex-pro` registers its own
+    // `subagent_codex` per Agent, and two rows registering that name in one
+    // scope collide — the later registration throws and its tool never appears.
+    enable: [],
     append: [],
   },
   heavy: {
@@ -66,7 +70,9 @@ const PRESETS = {
     // No tool row is added here — `dsh-plugin-lcu` is mounted at the root and
     // registers its tools per Agent by checking this preset's id.
     presentation: 'both',
-    enable: ['tool-subagent-codex'],
+    // Same reason as `daily`: the official Codex row stays disabled so that
+    // `dsh-subagent-codex-pro` is the only provider of `subagent_codex`.
+    enable: [],
     append: [],
   },
 }
@@ -238,11 +244,49 @@ function buildBlock(baseLines, { withHeavy }) {
 }
 
 /** Replace the marked block in place, or append one. */
+/**
+ * Top-level entries inside the marked region that this script did not write.
+ *
+ * The settings UI appends its own entries to the profile patch, and it can land
+ * them between the markers — the model-selection settings and the preset
+ * registry have both done so. Splicing the block would delete them silently,
+ * taking the user's settings with it, so they are collected and re-emitted after
+ * the block.
+ *
+ * @param region - the text between the markers.
+ * @returns each foreign entry, verbatim.
+ */
+function foreignEntries(region) {
+  const lines = region.split('\n')
+  const out = []
+  let i = 0
+  while (i < lines.length) {
+    // This script's own rows are indented, or the single `- insert:` shell.
+    if (/^- (?!insert:)\S/.test(lines[i])) {
+      const start = i
+      i += 1
+      while (i < lines.length && !/^- (?!insert:)\S/.test(lines[i])) i += 1
+      out.push(lines.slice(start, i).join('\n').replace(/\s+$/, ''))
+      continue
+    }
+    i += 1
+  }
+  return out
+}
+
 function spliceBlock(text, block) {
   const begin = text.indexOf(BEGIN)
   const end = text.indexOf(END)
   if (begin >= 0 && end > begin) {
-    return text.slice(0, begin) + block + text.slice(end + END.length)
+    const foreign = foreignEntries(text.slice(begin, end))
+    if (foreign.length > 0) {
+      process.stderr.write(
+        `preserving ${foreign.length} entr${foreign.length === 1 ? 'y' : 'ies'} found inside the block:\n`
+        + foreign.map((entry) => `  ${entry.split('\n')[0]}\n`).join(''),
+      )
+    }
+    const kept = foreign.length === 0 ? '' : `\n${foreign.join('\n\n')}\n`
+    return text.slice(0, begin) + block + text.slice(end + END.length) + kept
   }
   const separator = text.endsWith('\n') ? '\n' : '\n\n'
   return `${text}${separator}${block}\n`
