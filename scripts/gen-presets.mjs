@@ -21,7 +21,8 @@
  *   node scripts/gen-presets.mjs                # write into the desktop profile patch
  *   node scripts/gen-presets.mjs --dry-run      # print, write nothing
  *   node scripts/gen-presets.mjs --out FILE     # write to FILE instead
- *   node scripts/gen-presets.mjs --with-heavy   # also emit preset-heavy (needs dsh-plugin-lcu)
+ *   node scripts/gen-presets.mjs                # emits daily and heavy
+ *   node scripts/gen-presets.mjs --daily-only   # refuses if the file already has heavy
  *   node scripts/gen-presets.mjs --asar PATH    # override the app.asar path
  *   node scripts/gen-presets.mjs --profile DIR  # override the profile directory
  */
@@ -158,6 +159,42 @@ function setPresentationMode(lines, mode) {
   throw new Error('tool-presentation row has no `mode:` field')
 }
 
+/**
+ * Ensure one `key: value` inside a row's `config:` block.
+ *
+ * DSH ships model selection enabled on the generic `subagent` row but not on
+ * `subagent_codex`, so the Codex row's schema exposes only `description` and
+ * `prompt`. A caller who asks for a specific Codex model and thinking level then
+ * has nowhere to put it, and the tool they were told to use is the one tool that
+ * cannot express the request — a recorded session worked around it by shelling
+ * out to `codex exec`, leaving the harness's own delegation path unused. Enable
+ * the same surface here instead of asking every user to hand-patch a block this
+ * script owns and regenerates.
+ *
+ * Idempotent: a key that is already present is left exactly as it is.
+ *
+ * @param lines - the row list from the base preset.
+ * @param rowId - the row to edit.
+ * @param key - the config key to ensure.
+ * @param value - the literal YAML value to write.
+ * @returns the edited row list.
+ */
+function setConfigValue(lines, rowId, key, value) {
+  const start = findRow(lines, rowId)
+  // `body` is a generator: materialize it, because two passes are needed.
+  const rows = [...body(lines, start)]
+  const configAt = rows.find((i) => /^\s*config:\s*$/.test(lines[i]))
+  if (configAt === undefined) throw new Error(`${rowId} row has no \`config:\` block`)
+  const configIndent = indentOf(lines[configAt])
+  const inside = rows.filter((i) => i > configAt && indentOf(lines[i]) > configIndent)
+  if (inside.some((i) => new RegExp(`^\\s*${key}:`).test(lines[i]))) return lines
+  const first = inside[0]
+  if (first === undefined) throw new Error(`${rowId} config block is empty`)
+  const next = [...lines]
+  next.splice(first, 0, `${' '.repeat(indentOf(lines[first]))}${key}: ${value}`)
+  return next
+}
+
 /** Extract the `plugins:` sub-tree (the row list) from a preset patch file. */
 function extractPlugins(lines) {
   const index = lines.findIndex((line) => /^\s*plugins:\s*$/.test(line))
@@ -180,9 +217,13 @@ function extractPlugins(lines) {
 
 function renderPreset(spec, basePlugins) {
   const plugins = spec.enable.reduce(enableRow, [...basePlugins])
+  // Codex delegation must expose the same model surface the generic subagent row
+  // already has, or "use Codex with this model and thinking level" is not a
+  // request the tool can carry.
+  const withModelSelection = setConfigValue(plugins, 'tool-subagent-codex', 'modelSelectionSettings', 'true')
   const withMode = spec.presentation === null
-    ? plugins
-    : setPresentationMode(plugins, spec.presentation)
+    ? withModelSelection
+    : setPresentationMode(withModelSelection, spec.presentation)
   const out = [
     `    - id: preset-${spec.id}`,
     "      name: '@deepseek-ai/dsh-agent-preset'",
@@ -205,7 +246,11 @@ function renderPreset(spec, basePlugins) {
 function parseArgs(argv) {
   const opts = {
     dryRun: false,
-    withHeavy: false,
+    // Default to the full set: this script ships with dsh-plugin-lcu, and
+    // `heavy` is the preset that attaches it. Defaulting to daily-only meant a
+    // routine re-run after a DSH upgrade silently deleted the preset computer
+    // use depends on.
+    withHeavy: true,
     out: undefined,
     asar: DEFAULT_ASAR,
     profile: DEFAULT_PROFILE,
@@ -214,6 +259,7 @@ function parseArgs(argv) {
     const arg = argv[i]
     if (arg === '--dry-run') opts.dryRun = true
     else if (arg === '--with-heavy') opts.withHeavy = true
+    else if (arg === '--daily-only') opts.withHeavy = false
     else if (arg === '--out') opts.out = argv[++i]
     else if (arg === '--asar') opts.asar = argv[++i]
     else if (arg === '--profile') opts.profile = argv[++i]
@@ -254,6 +300,19 @@ function main() {
   } else {
     const target = opts.out ?? join(opts.profile, 'cordis.patch.yml')
     const before = readFileSync(target, 'utf8')
+    // Never delete a preset this file already had. A re-run is the documented
+    // response to a DSH upgrade, and it must not be able to take away the mode a
+    // user relies on as a side effect of an argument they did not pass.
+    for (const preset of ['daily', 'heavy']) {
+      const had = before.includes(`- id: preset-${preset}`)
+      const keeps = block.includes(`- id: preset-${preset}`)
+      if (had && !keeps) {
+        throw new Error(
+          `${target} already defines preset-${preset} and this run would remove it. `
+          + 'Re-run without --daily-only to keep every preset the file has.',
+        )
+      }
+    }
     writeFileSync(target, spliceBlock(before, block), { mode: 0o600 })
     process.stderr.write(`${verb} ${target}\n`)
   }
