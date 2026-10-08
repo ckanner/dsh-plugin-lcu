@@ -1,9 +1,9 @@
 /**
- * LCU approval shapes.
+ * Approval shapes.
  *
- * LCU's original runtime asks the host before it touches an app, and the request
+ * The runtime asks the host before it touches an app, and the request
  * is a specific `elicitation/create` form. This ports the recognition and
- * mapping rules from LCU's own shared client so a DSH host presents exactly the
+ * mapping rules from the runtime's shared client so a DSH host presents exactly the
  * choices the runtime offered — no more (granting an unoffered persistence scope
  * would let the agent keep desktop access the runtime meant to bound) and no
  * fewer (dropping `always` would nag the user every turn).
@@ -26,7 +26,7 @@ export interface NativeAppApproval {
   readonly choices: readonly ApprovalChoice[]
 }
 
-/** Persistence scopes the runtime can offer, in the order LCU presents them. */
+/** Persistence scopes the runtime can offer, in the order it presents them. */
 const PERSISTENCE: readonly (readonly ['session' | 'always', string])[] = [
   ['session', 'Allow for this session'],
   ['always', 'Always allow'],

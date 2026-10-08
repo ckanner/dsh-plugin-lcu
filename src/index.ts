@@ -2,7 +2,7 @@
  * `dsh-plugin-lcu` — drive the desktop and Chrome from DeepSeek Harness.
  *
  * The plugin is one root-scoped row. It does not open anything at load time:
- * LCU (and the CUA runtime behind it) starts only for an Agent whose preset is
+ * The runtime starts only for an Agent whose preset is
  * listed in `presets`, and stops when that Agent is disposed. That keeps a
  * heavy, permission-bearing capability off every session that does not need it.
  *
@@ -31,6 +31,9 @@ import {
 } from './connection.ts'
 import { randomUUID } from 'node:crypto'
 
+import { ManagedSession, type RuntimeConnection } from './session.ts'
+
+import { AppError, generationOf, planLaunch, resolveApp } from './app.ts'
 import { diag, describe } from './diag.ts'
 import { isAgentHostApp } from './host-guard.ts'
 import { registerLcuTools } from './tool.ts'
@@ -38,8 +41,6 @@ import { registerLcuTools } from './tool.ts'
 export const name = 'lcu'
 export const inject = ['tools', 'systemPrompt']
 
-/** Where the installer puts the launcher. */
-const DEFAULT_COMMAND = join(homedir(), '.local/share/lcu/current/bin/lcu')
 
 /**
  * What this host adds to the server's own instructions.
@@ -65,11 +66,23 @@ const DEFAULT_SECTION_ORDER = 0
 
 /** Plugin configuration. */
 export interface Config {
-  /** LCU launcher; defaults to the installed path, overridable for a custom prefix. */
+  /**
+   * The ChatGPT application whose runtime provides computer use.
+   *
+   * Defaults to the standard installation. The plugin launches the runtime from
+   * inside this application directly — it does not go through a wrapper.
+   */
+  app?: string
+  /**
+   * An explicit executable replacing the computed launch, for an unusual install.
+   *
+   * Set this only when the application is somewhere the built-in resolution
+   * cannot reach; it bypasses the runtime's own environment setup.
+   */
   command?: string
-  /** Enable the Chrome surface (`lcu --chrome`); needs the extension and site approvals. */
+  /** Enable the runtime's browser surface; needs the official browser extension and site approvals. */
   chrome?: boolean
-  /** Enable the original computer-audio recording API (`lcu --audio`). */
+  /** Enable the runtime's computer-audio recording API. */
   audio?: boolean
   /**
    * Agent preset ids whose sessions get the tools.
@@ -89,14 +102,16 @@ export interface Config {
    * The application hosting the agent can never be admitted this way.
    */
   allowedApps?: string[]
-  /** Prompt section order for the injected LCU instructions. */
+  /** Prompt section order for the injected runtime instructions. */
   sectionOrder?: number
 }
 
 /** Resolved, defaulted configuration. */
 interface Settings {
-  readonly command: string
-  readonly args: readonly string[]
+  readonly appPath: string | undefined
+  readonly command: string | undefined
+  readonly chrome: boolean
+  readonly audio: boolean
   readonly presets: readonly string[]
   readonly allowedOrigins: ReadonlySet<string>
   readonly allowedApps: ReadonlySet<string>
@@ -107,12 +122,11 @@ interface Settings {
 const ORIGIN_QUESTION = 'Allow computer use to access this site?'
 
 function resolveSettings(config: Config): Settings {
-  const args: string[] = []
-  if (config.chrome === true) args.push('--chrome')
-  if (config.audio === true) args.push('--audio')
   return {
-    command: config.command ?? DEFAULT_COMMAND,
-    args,
+    appPath: config.app,
+    command: config.command,
+    chrome: config.chrome === true,
+    audio: config.audio === true,
     presets: config.presets ?? ['heavy'],
     allowedOrigins: normalizeOrigins(config.allowedOrigins ?? []),
     allowedApps: normalizeApps(config.allowedApps),
@@ -121,7 +135,7 @@ function resolveSettings(config: Config): Settings {
 }
 
 /**
- * Mount the LCU capability.
+ * Mount the computer-use capability.
  *
  * @param ctx - the host context this row mounts into.
  * @param config - the row's configuration.
@@ -134,7 +148,7 @@ export function apply(ctx: Context, config: Config): void {
    * the desktop may still be mid-teardown, so calls are refused.
    */
   interface Attached {
-    readonly connection: LcuConnection
+    readonly connection: RuntimeConnection
     /** Explicitly `| undefined` so the gate can be cleared under exactOptionalPropertyTypes. */
     pendingCleanup?: { readonly sessionId: string; readonly turnId: string } | undefined
     /** The turn number last seen from the step pipeline, for change detection only. */
@@ -148,8 +162,24 @@ export function apply(ctx: Context, config: Config): void {
     turnId?: string | undefined
   }
   const connections = new Map<Agent, Attached>()
-  diag(`apply: presets=${JSON.stringify(settings.presets)} command=${settings.command} args=${JSON.stringify(settings.args)}`
+  diag(`apply: presets=${JSON.stringify(settings.presets)} chrome=${String(settings.chrome)} app=${describe(settings.appPath)}`
     + ` allowedApps=${JSON.stringify([...settings.allowedApps])} allowedOrigins=${JSON.stringify([...settings.allowedOrigins])}`)
+
+  // Resolve the application once, up front, so a machine that cannot run the
+  // runtime says so at load rather than at the first tool call.
+  try {
+    const probe = planLaunch({
+      ...(settings.appPath === undefined ? {} : { appPath: settings.appPath }),
+      ...(settings.command === undefined ? {} : { command: settings.command }),
+      chrome: settings.chrome,
+      audio: settings.audio,
+    })
+    diag(`  app: ${probe.paths.app} version=${probe.paths.version} runtime=${probe.paths.runtimeVersion}`)
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error)
+    diag(`  app: UNAVAILABLE ${reason}`)
+    ctx.logger.warn(`lcu: computer use is unavailable (${reason})`)
+  }
   diag(`  services: agentPresets=${describe(ctx.get('agentPresets'))} userQuestions=${describe(ctx.get('userQuestions'))} computerUse=${describe(ctx.get('computerUse'))} attachments=${describe(ctx.get('attachments'))} llm=${describe(ctx.get('llm'))}`)
 
   // Reserve the deployment's computer-use provider slot when the seam exists.
@@ -216,7 +246,7 @@ export function apply(ctx: Context, config: Config): void {
 
     const origin = originApprovalOrigin(request)
     if (origin !== undefined) {
-      // LCU keeps no permission cache; an exact pre-approved origin is the only
+      // The plugin keeps no permission cache; an exact pre-approved origin is the only
       // thing answered without asking. The log names every asked origin so a
       // user can add the ones they keep approving to `allowedOrigins`.
       const preApproved = isPreApprovedOrigin(request, settings.allowedOrigins)
@@ -253,23 +283,73 @@ export function apply(ctx: Context, config: Config): void {
   /** Open and prepare one Agent's connection; never throws. */
   async function attach(agent: Agent, signal?: AbortSignal): Promise<void> {
     if (connections.has(agent)) return
-    const connection = new LcuConnection({
-      command: settings.command,
-      args: settings.args,
-      onElicitation: (request, elicitSignal) => presentApproval(agent, request, elicitSignal),
-      onStderr: (line) => { ctx.logger.debug(`lcu: ${line}`) },
-    })
-    diag(`  attach: connecting ${settings.command}`)
+    // One plan per connection: the identity the runtime falls back to is per
+    // connection, so two sessions never share one.
+    let first: LcuConnection | undefined
+    /** Build a plan and open one connection from it. */
+    async function connectRuntime(): Promise<LcuConnection> {
+      const plan = planLaunch({
+        ...(settings.appPath === undefined ? {} : { appPath: settings.appPath }),
+        ...(settings.command === undefined ? {} : { command: settings.command }),
+        chrome: settings.chrome,
+        audio: settings.audio,
+        identity: `dsh-${String(agent.id)}`,
+      })
+      diag(`  attach: launching ${plan.command} ${JSON.stringify(plan.args)}`)
+      const opened = new LcuConnection({
+        command: plan.command,
+        args: plan.args,
+        env: plan.env,
+        onElicitation: (request, elicitSignal) => presentApproval(agent, request, elicitSignal),
+        onStderr: (line) => { ctx.logger.debug(`lcu: ${line}`) },
+      })
+      await opened.connect(signal)
+      first ??= opened
+      return opened
+    }
+
+    let session: ManagedSession
     try {
-      await connection.connect(signal)
+      session = await ManagedSession.open({
+        connect: async (reason) => {
+          const opened = await connectRuntime()
+          if (reason === 'regenerated') {
+            diag(`  reattach: new runtime ${describe(opened.serverInfo)}`)
+          }
+          return opened
+        },
+        // The runtime is executed from files the application replaces when it
+        // updates, so this is what keeps a long session on one generation.
+        generation: () => generationOf(resolveApp(settings.appPath)),
+        onRegenerated: ({ from, to }) => {
+          diag(`  regenerate: application changed; runtime replaced (${from.slice(0, 40)} -> ${to.slice(0, 40)})`)
+          ctx.logger.info('lcu: the ChatGPT application changed; the runtime was restarted from the new files')
+        },
+        onRegenerateFailed: (error: unknown) => {
+          const reason = error instanceof Error ? error.message : String(error)
+          diag(`  regenerate FAILED: ${reason}`)
+          ctx.logger.warn(`lcu: could not restart the runtime after an application change (${reason})`)
+        },
+        onGenerationUnreadable: (error: unknown) => {
+          // Not a warning: the bundle can be briefly unreadable mid-update, and the
+          // next call checks again.
+          diag(`  generation unreadable, keeping the current connection: ${error instanceof Error ? error.message : String(error)}`)
+        },
+      })
     } catch (error: unknown) {
-      await connection.close()
-      // A missing or broken LCU must not fail the session: the preset simply
+      // A missing or unusable runtime must not fail the session: the preset simply
       // runs without the desktop tools.
-      ctx.logger.warn(`lcu: could not start for this session (${error instanceof Error ? error.message : String(error)})`)
+      const reason = error instanceof AppError ? error.message : (error instanceof Error ? error.message : String(error))
+      diag(`  attach: cannot launch: ${reason}`)
+      ctx.logger.warn(`lcu: computer use is unavailable (${reason})`)
       return
     }
-    diag(`  attach: connected, server=${describe(connection.serverInfo)} tools=${JSON.stringify(connection.allTools.map((t) => t.name))} instructions=${String(connection.instructions.length)}B`)
+    if (first === undefined) {
+      diag('  attach: no connection was opened')
+      return
+    }
+    const connection = session
+    diag(`  attach: connected, server=${describe(first.serverInfo)} tools=${JSON.stringify(first.allTools.map((t) => t.name))} instructions=${String(first.instructions.length)}B`)
     const state: Attached = { connection }
     // The runtime binds approvals and the per-app Stop to a real session and
     // turn, so the connection carries the session identity from the start.
@@ -306,12 +386,12 @@ export function apply(ctx: Context, config: Config): void {
     agent.ctx.systemPrompt.section({
       name: 'lcu-instructions',
       order: settings.sectionOrder,
-      text: connection.instructions === ''
+      text: first.instructions === ''
         ? LCU_HOST_NOTE
-        : `${connection.instructions}\n\n${LCU_HOST_NOTE}`,
+        : `${first.instructions}\n\n${LCU_HOST_NOTE}`,
     })
 
-    ctx.logger.info(`lcu: ${connection.serverInfo.name ?? 'server'} attached for this session`)
+    ctx.logger.info(`lcu: ${first.serverInfo.name ?? 'server'} attached for this session`)
   }
 
   /**

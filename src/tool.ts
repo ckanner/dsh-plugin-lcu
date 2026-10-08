@@ -18,7 +18,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
 
-import type { LcuConnection, LcuContentBlock, LcuTool } from './connection.ts'
+import type { LcuContentBlock, LcuTool } from './connection.ts'
+import type { RuntimeConnection } from './session.ts'
 import { MODEL_TOOL_NAMES, LcuError } from './connection.ts'
 import { diag } from './diag.ts'
 
@@ -299,7 +300,7 @@ export function stuckStopHint(text: string): string | undefined {
  */
 export function createLcuTool(
   descriptor: LcuTool,
-  connection: LcuConnection,
+  connection: RuntimeConnection,
   ctx: Context,
   options: LcuToolOptions = {},
 ): ToolDefinition {
@@ -376,7 +377,7 @@ export function createLcuTool(
  * @throws {LcuError} when the server does not expose the model tools.
  */
 export function buildLcuTools(
-  connection: LcuConnection,
+  connection: RuntimeConnection,
   ctx: Context,
   options: LcuToolOptions = {},
 ): ToolDefinition[] {
@@ -402,7 +403,7 @@ export function buildLcuTools(
  * @returns a registrable tool definition.
  */
 export function createComputerUseStopTool(
-  connection: LcuConnection,
+  connection: RuntimeConnection,
   currentTurn: () => string | undefined,
 ): ToolDefinition {
   const toolName = 'computer_use_stop'
@@ -413,10 +414,10 @@ export function createComputerUseStopTool(
       + 'Call it with no arguments to list them, or with `app` set to one of the returned bundle '
       + 'identifiers to stop using it. This is what clears the host application\'s "computer use is '
       + 'active" state for an app without ending the session.\n'
-      + 'Use this only when the user asks for it: a Stop is cleared by the host application\'s own '
-      + 'turn cleanup, which is unreliable here, so an app you stop can end up refusing every later '
-      + 'turn until the host application is relaunched. Listing is free and always safe; ordinary '
-      + 'computer use never needs a Stop.',
+      + 'Use this only when the user asks for it. A Stop is released by the host application\'s own '
+      + 'turn cleanup, which this plugin performs, so the next turn can use that application again — '
+      + 'but it still refuses to be used again within the turn that stopped it. Listing is free and '
+      + 'always safe; ordinary computer use never needs a Stop.',
     // A whole JSON Schema object, exactly as the server's descriptors are
     // carried: the harness rejects anything that is not `type: "object"`.
     parameters: {
@@ -450,6 +451,11 @@ export function createComputerUseStopTool(
       },
     },
     async execute(args: unknown): Promise<unknown> {
+      if (!connection.hasHostControl) {
+        throw new Error(
+          'the per-application Stop is unavailable: nothing in this configuration serves the runtime control channel',
+        )
+      }
       const turn = currentTurn()
       if (turn === undefined) {
         throw new Error('no active turn: computer use is released between turns')
@@ -485,7 +491,7 @@ export function createComputerUseStopTool(
  */
 export function registerLcuTools(
   agentCtx: Context,
-  connection: LcuConnection,
+  connection: RuntimeConnection,
   ctx: Context,
   options: LcuToolOptions = {},
 ): () => void {

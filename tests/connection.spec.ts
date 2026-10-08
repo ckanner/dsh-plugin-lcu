@@ -1,9 +1,11 @@
 /**
- * Contract tests for the LCU connection.
+ * Contract tests for the connection, against the real computer-use runtime.
  *
- * These run against the real installed `lcu` server, because the whole point of
- * this module is the wire behaviour: protocol negotiation, tool visibility, and
- * fail-closed approvals. Skipped automatically when `lcu` is not installed.
+ * The connection is built from this plugin's own launch plan — the runtime inside
+ * the ChatGPT application is started directly, with no wrapper in between — so
+ * these verify the wire behaviour *and* the launch path the plugin actually
+ * ships: protocol negotiation, tool visibility, real JavaScript, and fail-closed
+ * approvals. Skipped when the application is not installed.
  *
  * Run: npm test      (or: node --test tests/connection.spec.ts)
  */
@@ -14,17 +16,30 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+import { planLaunch, type LaunchPlan } from '../src/app.ts'
 import {
   HOST_ONLY_TOOL_NAMES, LcuConnection, MODEL_TOOL_NAMES, TURN_CLEANUP_TIMEOUT_CODE,
   classifyTurnEndFailure, resolveElicitation, turnMetadataFor,
 } from '../src/connection.ts'
 
-const LCU = join(homedir(), '.local/share/lcu/current/bin/lcu')
-const installed = existsSync(LCU)
-const skip = installed ? false : 'lcu is not installed at ~/.local/share/lcu'
+/** The state of the machine, decided once for the whole file. */
+const launch: { plan?: LaunchPlan; skip: string | false } = { skip: false }
+try {
+  launch.plan = planLaunch({ chrome: false, audio: false, identity: 'dsh-test-connection' })
+} catch (error: unknown) {
+  launch.skip = `the computer-use runtime is unavailable: ${error instanceof Error ? error.message : String(error)}`
+}
+const skip = launch.skip
+
+/** A connection built the way the plugin builds it. */
+function openConnection(): LcuConnection {
+  const plan = launch.plan
+  if (plan === undefined) throw new Error('no launch plan')
+  return new LcuConnection({ command: plan.command, args: plan.args, env: plan.env })
+}
 
 test('connects, negotiates a protocol revision, and carries server instructions', { skip }, async () => {
-  const connection = new LcuConnection({ command: LCU })
+  const connection = openConnection()
   try {
     await connection.connect()
     assert.equal(connection.serverInfo.name, 'rmcp')
@@ -35,7 +50,7 @@ test('connects, negotiates a protocol revision, and carries server instructions'
 })
 
 test('exposes exactly js/js_reset to the model and keeps host-only tools out', { skip }, async () => {
-  const connection = new LcuConnection({ command: LCU })
+  const connection = openConnection()
   try {
     await connection.connect()
     const modelNames = connection.modelTools().map((tool) => tool.name)
@@ -57,7 +72,7 @@ test('exposes exactly js/js_reset to the model and keeps host-only tools out', {
 })
 
 test('runs real JavaScript through the CUA runtime', { skip }, async () => {
-  const connection = new LcuConnection({ command: LCU })
+  const connection = openConnection()
   try {
     await connection.connect()
     const result = await connection.callTool('js', { code: 'await cua.getState();' }, { timeoutMs: 180_000 })
@@ -148,26 +163,39 @@ test('classifies a failed turn cleanup instead of ignoring it', () => {
   assert.match(silent?.message ?? '', /unknown error/)
 })
 
-test('the macOS control channel is advertised only when it exists', { skip }, async () => {
-  const connection = new LcuConnection({ command: LCU })
+test('the macOS control channel is advertised only when it is served', { skip }, async () => {
+  const connection = openConnection()
   try {
     await connection.connect()
     if (process.platform !== 'darwin') {
       assert.equal(connection.hasHostControl, false)
       return
     }
-    // The host owns the socket and passes it down; a connection that never
-    // created one must say so rather than fail a call opaquely.
-    assert.equal(connection.hasHostControl, true)
-    // A status query is scoped to a real session and turn.
-    await assert.rejects(() => connection.controlStatus('', ''), /./)
+    // The connection serves the socket, but the runtime's Sky service is what has
+    // to connect to it, and nothing here guarantees that: this probe answers
+    // elicitations with a refusal and touches no application, so no turn context
+    // is ever reported. The honest answer is therefore "not reachable yet", and it
+    // is what keeps `computer_use_stop` from promising something it cannot do.
+    //
+    // A bare `false` is the point. The path existing is not the answer — a
+    // configuration that installs no wrapper never connects to it at all, and
+    // reporting a channel nobody serves turns "not supported here" into a
+    // connection error the caller has to interpret.
+    assert.equal(typeof connection.hasHostControl, 'boolean')
+    assert.equal(connection.hasHostControl, false)
+
+    // Nothing is held, and asking about a turn this runtime never saw is not an
+    // error: it means there is nothing to release.
+    assert.deepEqual(await connection.controlStatus('never-seen', 'never-seen'), [])
+    // A Stop for an application nothing is holding is refused rather than obeyed.
+    await assert.rejects(() => connection.controlStop('never-seen', 'never-seen', 'com.apple.finder'), /./)
   } finally {
     await connection.close()
   }
 })
 
 test('turn_ended refuses synthetic identifiers', { skip }, async () => {
-  const connection = new LcuConnection({ command: LCU })
+  const connection = openConnection()
   try {
     await connection.connect()
     await assert.rejects(() => connection.turnEnded('', 'turn-1'), /real session id and turn id/)

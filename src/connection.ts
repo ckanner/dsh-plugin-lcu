@@ -1,14 +1,14 @@
 /**
- * The LCU MCP client.
+ * The runtime MCP client.
  *
  * Why not `@modelcontextprotocol/sdk` or the host's `@modelcontextprotocol/client`:
  * the harness's own MCP bridge declares `capabilities: {}` and therefore cannot
- * answer elicitation, which is how LCU asks for per-app approval; and pulling a
+ * answer elicitation, which is how the runtime asks for per-app approval; and pulling a
  * second SDK into a profile plugin would pin a version the host does not own.
  * MCP over stdio is newline-delimited JSON-RPC, so the wire is small enough to
  * own here and keeps this plugin dependency-free at runtime.
  *
- * Contract kept from `amontlabs/lcu`:
+ * Contract taken from the runtime:
  * - declare `capabilities.elicitation` and answer `elicitation/create`
  * - expose only `js` and `js_reset` to the model; `turn_ended` and
  *   `js_add_node_module_dir` are host-only
@@ -59,6 +59,7 @@ export const MODEL_TOOL_NAMES: readonly string[] = ['js', 'js_reset']
 
 /** Host-only tools, named so a mistake is loud rather than silent. */
 import { diag } from './diag.ts'
+import { ControlServer } from './control.ts'
 
 export const HOST_ONLY_TOOL_NAMES: readonly string[] = ['turn_ended', 'js_add_node_module_dir']
 
@@ -97,11 +98,11 @@ export type LcuTurnEndEvent = 'Stop' | 'Interrupt' | 'SubagentStop'
 /** MCP protocol revision this client asks for; the server negotiates. */
 const PROTOCOL_VERSION = '2025-06-18'
 
-/** LCU's own approval timeout: effectively "never expire a pending approval". */
+/** The runtime's own approval timeout: effectively "never expire a pending approval". */
 const NO_APPROVAL_TIMEOUT_MS = 2 ** 31 - 1
 
 const DEFAULT_CALL_TIMEOUT_MS = 120_000
-/** The original host's control channel is bounded; 45 s matches LCU's own client. */
+/** The original host's control channel is bounded; 45 s matches its own client. */
 const CONTROL_TIMEOUT_MS = 45_000
 const CONTROL_RESPONSE_LIMIT = 1024 * 1024
 const DEFAULT_TURN_END_TIMEOUT_MS = 120_000
@@ -109,23 +110,30 @@ const CONNECT_TIMEOUT_MS = 120_000
 
 /** Connection options. */
 export interface LcuConnectionOptions {
-  /** Executable to spawn; defaults to the installed `lcu` launcher. */
+  /** Executable to spawn, together with its arguments and environment. */
   readonly command: string
   /** Extra arguments, e.g. `['--chrome']` to enable the browser surface. */
   readonly args?: readonly string[]
-  /** Extra environment layered over the current process environment. */
-  readonly env?: Readonly<Record<string, string>>
+  /**
+   * The complete child environment.
+   *
+   * The runtime selects its own node, module roots and surfaces from these, so
+   * a caller replaces rather than layers: the launcher computes the whole set.
+   */
+  readonly env?: NodeJS.ProcessEnv
   /** Working directory for the child process. */
   readonly cwd?: string
   /**
    * Answer one elicitation. Omit to fail closed: every approval then cancels,
-   * which is what LCU expects from a host that cannot present the request.
+   * which is what the runtime expects from a host that cannot present the request.
    */
   readonly onElicitation?: (request: LcuElicitationRequest, signal: AbortSignal) => Promise<LcuElicitationResponse>
   /** Called whenever the server's tool list changes. */
   readonly onToolsChanged?: (tools: readonly LcuTool[]) => void
   /** Receives child-process stderr lines; never model-visible. */
   readonly onStderr?: (line: string) => void
+  /** Receives control-channel decisions, for the diagnostic log. */
+  readonly onDiag?: (message: string) => void
 }
 
 /** One JSON-RPC message on the wire. */
@@ -168,7 +176,7 @@ export class LcuError extends Error {
  *
  * The runtime reports its own cleanup timeout as an ordinary error result with a
  * recognizable detail. Missing it would let a stalled cleanup look like a
- * healthy turn, which is exactly what LCU's contract asks a host not to do.
+ * healthy turn, which is exactly what the runtime's contract asks a host not to do.
  *
  * @param result - the failed call's result.
  * @returns the classified error, or `undefined` when the call succeeded.
@@ -194,7 +202,7 @@ export function classifyTurnEndFailure(result: LcuCallResult): LcuError | undefi
 /**
  * Answer one elicitation, failing closed on every unexpected shape.
  *
- * LCU requires this exact discipline: a host that cannot present the request,
+ * The runtime requires this exact discipline: a host that cannot present the request,
  * a handler that throws, or an answer that is not one of the three actions must
  * all end as `cancel`, because anything else would silently grant desktop access.
  *
@@ -226,9 +234,9 @@ export async function resolveElicitation(
 }
 
 /**
- * One long-lived connection to the `lcu` MCP server.
+ * One long-lived connection to the runtime's MCP server.
  *
- * The connection is per Agent/Session: LCU carries a persistent JavaScript
+ * The connection is per Agent/Session: the runtime carries a persistent JavaScript
  * session on its side, and its approvals are scoped to a real host session and
  * turn, so sharing one connection across agents would interleave both.
  */
@@ -245,6 +253,10 @@ export class LcuConnection {
   #activeCalls = new Set<AbortSignal>()
   #controlDirectory: string | undefined
   #controlSocketPath: string | undefined
+  /** Serves the path the child is told about, and relays to the Sky wrapper. */
+  #controlServer: ControlServer | undefined
+  /** Set once a connection attempt shows nothing is listening. */
+  #controlUnavailable = false
 
   constructor(options: LcuConnectionOptions) {
     this.#options = options
@@ -274,7 +286,7 @@ export class LcuConnection {
   }
 
   /**
-   * Spawn `lcu`, complete the MCP handshake, and discover tools.
+   * Spawn the runtime, complete the MCP handshake, and discover tools.
    *
    * @throws {LcuError} when the process cannot start or the handshake fails.
    */
@@ -287,10 +299,16 @@ export class LcuConnection {
     this.#controlSocketPath = undefined
     if (process.platform === 'darwin') {
       try {
-        const { mkdtempSync, chmodSync } = await import('node:fs')
+        const { mkdtempSync, chmodSync, existsSync } = await import('node:fs')
         const { tmpdir } = await import('node:os')
         const { join } = await import('node:path')
-        const directory = mkdtempSync(join(tmpdir(), 'dsh-lcu-'))
+        // `/private/tmp`, not the per-user temporary directory. The wrapper that
+        // connects to this socket runs inside the runtime's JavaScript sandbox,
+        // and that sandbox refuses a Unix socket under `/var/folders/…` with
+        // EPERM — the same boundary that denies its file writes. `/private/tmp`
+        // is on the allowed side, which is why the wrapper this replaces uses it.
+        const base = existsSync('/private/tmp') ? '/private/tmp' : tmpdir()
+        const directory = mkdtempSync(join(base, 'dsh-lcu-'))
         chmodSync(directory, 0o700)
         this.#controlDirectory = directory
         this.#controlSocketPath = join(directory, 'c.sock')
@@ -299,7 +317,21 @@ export class LcuConnection {
         this.#controlSocketPath = undefined
       }
     }
-    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...this.#options.env }
+    // Serve the socket before the child exists: the wrapper connects to it as soon
+    // as the runtime asks it for anything, and a missing listener looks exactly
+    // like a configuration that has no control channel at all.
+    if (this.#controlSocketPath !== undefined) {
+      try {
+        this.#controlServer = await ControlServer.open(
+          this.#controlSocketPath,
+          (message) => { this.#options.onDiag?.(message) },
+        )
+      } catch (error: unknown) {
+        this.#controlServer = undefined
+        this.#options.onDiag?.(`control: could not serve ${this.#controlSocketPath}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    const childEnv: NodeJS.ProcessEnv = this.#options.env ?? { ...process.env }
     if (this.#controlSocketPath === undefined) delete childEnv.LCU_MAC_CONTROL_SOCKET
     else childEnv.LCU_MAC_CONTROL_SOCKET = this.#controlSocketPath
     let child: import('node:child_process').ChildProcess
@@ -401,11 +433,11 @@ export class LcuConnection {
   /**
    * Close the connection and let the runtime tear itself down.
    *
-   * Order matters: the server owns a process tree (the CUA kernel, its trusted
-   * worker, the macOS supervisor and the Sky helper), and LCU's supervisor exits
-   * when its lifetime socket closes. Closing stdin gives the server that
-   * orderly path; signalling first would orphan the tree on a machine that then
-   * keeps reporting computer use as active.
+   * Order matters: the server owns a process tree — the runtime kernel, its
+   * trusted worker and the signed Sky helper the macOS native pipe launches.
+   * Closing stdin gives the server its orderly shutdown path; signalling first
+   * would orphan that tree on a machine that then keeps reporting computer use
+   * as active.
    */
   /**
    * The original runtime reads its session and turn from `_meta`, and its
@@ -424,9 +456,19 @@ export class LcuConnection {
     return meta === undefined ? {} : { _meta: meta }
   }
 
-  /** Whether this platform and connection expose the explicit per-app Stop. */
+  /**
+   * Whether the explicit per-app Stop is actually available.
+   *
+   * The socket path alone is not the answer: a configuration that interposes no
+   * lifecycle service sets nothing up to serve it, and reporting a channel that
+   * cannot be reached would turn "this is not supported here" into a connection
+   * error the caller has to interpret.
+   */
   get hasHostControl(): boolean {
-    return this.#controlSocketPath !== undefined && !this.#closed
+    // Not "the path exists": a configuration that installs no wrapper never
+    // connects to it, and reporting a channel nobody serves turns "this is not
+    // supported here" into a connection error the caller has to interpret.
+    return this.#controlServer?.connected === true && !this.#closed && !this.#controlUnavailable
   }
 
   /**
@@ -508,7 +550,12 @@ export class LcuConnection {
         CONTROL_TIMEOUT_MS,
       )
       const socket = createConnection(socketPath)
-      socket.on('error', (error: Error) => { finish(new LcuError('turn_ended', `control connection failed: ${error.message}`)) })
+      socket.on('error', (error: NodeJS.ErrnoException) => {
+        // Nothing listening means this configuration has no control channel,
+        // rather than a channel that refused this particular request.
+        if (error.code === 'ENOENT' || error.code === 'ECONNREFUSED') this.#controlUnavailable = true
+        finish(new LcuError('turn_ended', `control connection failed: ${error.message}`))
+      })
       socket.on('connect', () => { socket.write(`${JSON.stringify(request)}\n`) })
       socket.on('data', (chunk: Buffer) => {
         buffer += chunk.toString('utf8')
@@ -551,22 +598,28 @@ export class LcuConnection {
   async close(): Promise<void> {
     this.#closed = true
     this.#failAll(new LcuError('spawn', 'connection closed'))
+    await this.#controlServer?.close()
+    this.#controlServer = undefined
     const child = this.#child
     this.#child = undefined
-    if (child === undefined || child.exitCode !== null) {
-      this.#removeControlDirectory()
-      return
-    }
     try {
-      child.stdin?.end()
-    } catch {
-      // A already-broken stdin just means we fall through to signalling.
+      if (child === undefined || child.exitCode !== null) return
+      try {
+        child.stdin?.end()
+      } catch {
+        // An already-broken stdin just means we fall through to signalling.
+      }
+      if (await this.#exited(child, 5_000)) return
+      child.kill('SIGTERM')
+      if (await this.#exited(child, 3_000)) return
+      child.kill('SIGKILL')
+      await this.#exited(child, 2_000)
+    } finally {
+      // Always. A socket in a directory nobody removes is a leak per connection,
+      // and the earlier version left one behind on every path that had to signal
+      // the child rather than have it exit on stdin.
+      this.#removeControlDirectory()
     }
-    if (await this.#exited(child, 5_000)) return
-    child.kill('SIGTERM')
-    if (await this.#exited(child, 3_000)) return
-    child.kill('SIGKILL')
-    await this.#exited(child, 2_000)
   }
 
   /** Resolve `true` once the child has exited, or `false` after `timeoutMs`. */

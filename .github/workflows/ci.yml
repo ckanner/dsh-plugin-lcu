@@ -29,6 +29,6 @@ jobs:
       - name: Build
         run: npm run build
       - name: Test
-        # The connection suite talks to a real `lcu` server and skips itself when
+        # The connection suite talks to a real computer-use runtime and skips itself when
         # none is installed, which is the case on CI.
         run: npm test

@@ -1,37 +1,45 @@
 #!/usr/bin/env node
 /**
- * probe-lcu.mjs — talk to the installed `lcu` MCP server directly.
+ * probe-lcu.mjs — talk to the computer-use runtime directly.
  *
- * A diagnostic for `dsh-plugin-lcu` development: it connects the way the plugin
- * will (newline-delimited JSON-RPC over stdio, `capabilities.elicitation`
- * declared), prints what the server advertises, and optionally calls one tool.
+ * A diagnostic for `dsh-plugin-lcu` development: it builds the same launch plan
+ * the plugin builds, connects the way the plugin does (newline-delimited
+ * JSON-RPC over stdio, `capabilities.elicitation` declared), prints what the
+ * server advertises, and optionally calls one tool. No harness is involved, so
+ * this separates a plugin problem from a runtime problem.
  *
  * Usage
  * -----
- *   node scripts/probe-lcu.mjs                    # initialize + tools/list
- *   node scripts/probe-lcu.mjs --instructions      # also dump server instructions
- *   node scripts/probe-lcu.mjs --call js --code 'return await cua.listApps()'
- *   node scripts/probe-lcu.mjs --command /path/to/lcu   # override the binary
+ *   node scripts/probe-lcu.mjs                          # initialize + tools/list
+ *   node scripts/probe-lcu.mjs --instructions           # also dump server instructions
+ *   node scripts/probe-lcu.mjs --call js --code 'await cua.getState();'
+ *   node scripts/probe-lcu.mjs --chrome                 # enable the browser surface
+ *   node scripts/probe-lcu.mjs --app /path/ChatGPT.app  # a different installation
+ *   node scripts/probe-lcu.mjs --command /path/binary   # bypass the computed launch
  *
  * It never answers elicitations, so any call that needs an approval fails closed
  * exactly like a host that cannot present the request.
  */
 
 import { spawn } from 'node:child_process'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 
-const DEFAULT_COMMAND = join(homedir(), '.local/share/lcu/current/bin/lcu')
+import { planLaunch } from '../lib/app.js'
 
 /** Newest protocol revision the MCP SDK pair here is expected to negotiate. */
 const PROTOCOL_VERSION = '2025-06-18'
 
 function parseArgs(argv) {
-  const opts = { command: DEFAULT_COMMAND, instructions: false, call: undefined, code: undefined, limit: 2000 }
+  const opts = {
+    app: undefined, command: undefined, chrome: false, audio: false,
+    instructions: false, call: undefined, code: undefined, limit: 2000,
+  }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
-    if (arg === '--command') opts.command = argv[++i]
+    if (arg === '--app') opts.app = argv[++i]
+    else if (arg === '--command') opts.command = argv[++i]
+    else if (arg === '--chrome') opts.chrome = true
+    else if (arg === '--audio') opts.audio = true
     else if (arg === '--instructions') opts.instructions = true
     else if (arg === '--call') opts.call = argv[++i]
     else if (arg === '--code') opts.code = argv[++i]
@@ -41,17 +49,17 @@ function parseArgs(argv) {
   return opts
 }
 
-/** One request/response session with the LCU MCP server. */
+/** One request/response session with the computer-use runtime. */
 class LcuSession {
-  constructor(command) {
+  constructor(plan) {
     this.nextId = 1
     this.pending = new Map()
     this.notifications = []
     this.stderr = ''
-    this.child = spawn(command, [], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env })
+    this.child = spawn(plan.command, [...plan.args], { stdio: ['pipe', 'pipe', 'pipe'], env: plan.env })
     this.child.stderr.on('data', (chunk) => { this.stderr += chunk.toString() })
     this.child.on('exit', (code) => {
-      for (const { reject } of this.pending.values()) reject(new Error(`lcu exited (${code})\n${this.stderr.slice(-800)}`))
+      for (const { reject } of this.pending.values()) reject(new Error(`the runtime exited (${code})\n${this.stderr.slice(-800)}`))
       this.pending.clear()
     })
     createInterface({ input: this.child.stdout }).on('line', (line) => this.#onLine(line))
@@ -96,7 +104,21 @@ class LcuSession {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2))
-  const session = new LcuSession(opts.command)
+  const plan = planLaunch({
+    ...(opts.app === undefined ? {} : { appPath: opts.app }),
+    ...(opts.command === undefined ? {} : { command: opts.command }),
+    chrome: opts.chrome,
+    audio: opts.audio,
+    identity: 'dsh-plugin-lcu-probe',
+  })
+  console.log('=== launch plan ===')
+  console.log(`  app:      ${plan.paths.app}`)
+  console.log(`  version:  ${plan.paths.version}`)
+  console.log(`  runtime:  ${plan.paths.runtimeVersion}`)
+  console.log(`  command:  ${plan.command}`)
+  console.log(`  args:     ${JSON.stringify(plan.args)}`)
+  console.log(`  surfaces: ${String(plan.env.CUA_REPL_ENABLED_SURFACES)}`)
+  const session = new LcuSession(plan)
   try {
     const initialized = await session.request('initialize', {
       protocolVersion: PROTOCOL_VERSION,

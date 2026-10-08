@@ -1,5 +1,5 @@
 /**
- * Best-effort diagnostic log for the LCU attach path.
+ * Best-effort diagnostic log for the attach, launch and approval path.
  *
  * The harness exposes plugin logs only through surfaces a running session
  * cannot read, and a failing `agent/created` listener is swallowed silently. So

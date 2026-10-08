@@ -1,16 +1,17 @@
 {
   "name": "dsh-plugin-lcu",
-  "version": "0.3.3",
-  "description": "Drive the desktop and Chrome from DeepSeek Harness through LCU (Codex computer use, decoupled from the app).",
+  "version": "0.3.0",
+  "description": "Drive the desktop and Chrome from DeepSeek Harness using the computer-use runtime inside the ChatGPT desktop application.",
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
     "dsh",
     "computer-use",
     "browser-use",
-    "lcu",
-    "codex",
-    "cua"
+    "cua",
+    "chatgpt",
+    "desktop-automation",
+    "macos"
   ],
   "license": "MIT",
   "author": {

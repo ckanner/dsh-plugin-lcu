@@ -1,11 +1,11 @@
 /**
  * The agent-host guard.
  *
- * LCU refuses to approve the application that is hosting the agent, because
+ * The application hosting the agent is refused, because
  * computer use can click anything an approved app shows — including the very
  * approval prompt — so approving the host would let the agent approve itself.
  *
- * LCU's own shared client does this; a host that replaces that client owns the
+ * The runtime's own shared client does this; a host that replaces that client owns the
  * rule. This is the DSH implementation: the agent's own process ancestry plus a
  * static list of dedicated agent hosts and terminals.
  *

@@ -1,16 +1,16 @@
 # The dsh-plugin-lcu bundle patch.
 #
-# One row. The plugin owns every LCU connection and registers the model-facing
-# computer-use tools per Agent; it starts nothing at load time, so a session pays
-# for the CUA runtime only when its Agent preset is listed here.
+# One row. The plugin owns every runtime connection and registers the
+# model-facing computer-use tools per Agent; it starts nothing at load time, so a
+# session pays for the runtime only when its Agent preset is listed here.
 #
 # `presets` is an explicit allowlist rather than a capability the preset
 # declares, because the server owns the tool schemas: they can only be fetched
 # after the MCP handshake, which happens once a matching Agent is created.
 #
-# `chrome: true` enables LCU's browser surface (`lcu --chrome`). It also needs
-# the official ChatGPT extension enabled in the Chrome profile and
-# `lcu browser install`; sites stay exact-origin approvals.
+# `chrome: true` enables the runtime's browser surface. It also needs the official
+# ChatGPT extension enabled in the browser profile you want to drive; sites stay
+# exact-origin approvals.
 
 - insert:
     - id: lcu
