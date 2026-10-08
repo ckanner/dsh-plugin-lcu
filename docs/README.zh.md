@@ -65,20 +65,23 @@ dsh plugin --profile <profile> add dsh-plugin-lcu
 
 ### 2. 生成 preset
 
-DSH 的 agent preset **没有继承**：一个 preset 的 `config.plugins` 就是它完整的插件列表，而 patch 是**整体替换**一个条目而不是合并进去。所以自定义 preset 必须重述它的基底。与其手抄那份列表，不如从**实际装着的** preset 生成：
+DSH 的 agent preset **没有继承**：一个 preset 的 `config.plugins` 就是它完整的插件列表，而 patch 是**整体替换**一个条目而不是合并进去。所以自定义 preset 必须重述它的基底 —— 而基底随应用一起发布，会随 DSH 升级变化。
+
+这份"重述"**不属于本包**。它服务的不止一个插件，而它写入的那个区间**DSH 自己的设置 UI 也会写**，所以它独立在外：
 
 ```sh
-node node_modules/dsh-plugin-lcu/scripts/gen-presets.mjs --profile ~/.dsh/profiles/<profile>
+git clone https://github.com/ckanner/dsh-preset-generator
+node dsh-preset-generator/src/gen-presets.mjs --profile ~/.dsh/profiles/<profile>
 ```
 
 它会在该 profile 的 `cordis.patch.yml` 里写一个带标记的块，含两个 preset：
 
 | preset | 基底 | 增加 |
 |---|---|---|
-| `daily` | 自带的 `ptc` preset | 启用 `subagent_codex` |
+| `daily` | 自带的 `ptc` preset | 一套自己的 Codex 委派 provider |
 | `heavy` | 同上，且 `tool-presentation: both` | 以上全部，且本插件接入 |
 
-DSH 升级后重跑一次，让副本跟上。`--with-heavy` 是隐含的；`--dry-run` 只打印不写；`--out FILE` 写到别处。
+DSH 升级后重跑一次，让副本跟上。`--daily-only` 只生成 `daily`；`--dry-run` 只打印不写；`--out FILE` 写到别处。官方的 `tool-subagent-codex` 行保持**禁用**（和基底一致）：另有一套 provider 自己注册 `subagent_codex`，而两行在同一个 scope 里注册同名工具会冲突。
 
 > `heavy` 特意把工具呈现设为 `both`。纯 `ptc` 呈现下模型只看得到 `run_code`，`js` 就得嵌成另一个 JavaScript 程序里的字符串。`both` 让 `js` 可以被直接调用。
 

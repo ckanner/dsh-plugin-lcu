@@ -75,22 +75,28 @@ manager (Settings ▸ Plugins) instead, which runs the same pnpm operation.
 ### 2. Generate the presets
 
 DSH agent presets have **no inheritance**: a preset's `config.plugins` is its complete plugin list, and
-a patch replaces a whole entry rather than merging into it. So a custom preset must restate its base.
-Rather than hand-copying that list, generate it from the preset that is actually installed:
+a patch replaces a whole entry rather than merging into it. So a custom preset must restate its base —
+and the base ships inside the application and changes when DSH is upgraded.
+
+That restatement is **not part of this package**. It serves more than one plugin, and the region it writes
+is also written by DSH's own settings UI, so it lives on its own:
 
 ```sh
-node node_modules/dsh-plugin-lcu/scripts/gen-presets.mjs --profile ~/.dsh/profiles/<profile>
+git clone https://github.com/ckanner/dsh-preset-generator
+node dsh-preset-generator/src/gen-presets.mjs --profile ~/.dsh/profiles/<profile>
 ```
 
 This writes a marked block into that profile's `cordis.patch.yml` containing two presets:
 
 | Preset | Base | Adds |
 |---|---|---|
-| `daily` | the shipped `ptc` preset | `subagent_codex` enabled |
+| `daily` | the shipped `ptc` preset | a Codex delegation provider of its own |
 | `heavy` | the same, with `tool-presentation: both` | everything above, and this plugin attaches |
 
-Re-run it after a DSH upgrade so the copies keep up. `--with-heavy` is implied; `--dry-run` prints
-without writing, and `--out FILE` writes somewhere else.
+Re-run it after a DSH upgrade so the copies keep up. `--daily-only` emits just `daily`, `--dry-run`
+prints without writing, and `--out FILE` writes somewhere else. The official `tool-subagent-codex` row
+stays disabled, as the base ships it: a separate provider registers its own `subagent_codex`, and two
+rows registering that name in one scope collide.
 
 > `heavy` sets the tool presentation to `both` on purpose. In pure `ptc` presentation the model only
 > sees `run_code`, so `js` would have to be nested as a JavaScript string inside another JavaScript

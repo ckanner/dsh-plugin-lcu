@@ -60,7 +60,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"tests/*.spec.ts\"",
     "prepare": "npm run build",
-    "presets": "node scripts/gen-presets.mjs",
     "probe": "node scripts/probe-lcu.mjs",
     "update-codex": "node scripts/update-codex.mjs"
   },
