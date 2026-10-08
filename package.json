@@ -38,6 +38,7 @@
   },
   "files": [
     "lib",
+    "helper",
     "cordis.patch.yml",
     "scripts",
     "dev-types",
