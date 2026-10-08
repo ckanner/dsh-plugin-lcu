@@ -412,7 +412,11 @@ export function createComputerUseStopTool(
       'List or release the applications the computer-use runtime currently holds for this session. '
       + 'Call it with no arguments to list them, or with `app` set to one of the returned bundle '
       + 'identifiers to stop using it. This is what clears the host application\'s "computer use is '
-      + 'active" state for an app without ending the session.',
+      + 'active" state for an app without ending the session.\n'
+      + 'Use this only when the user asks for it: a Stop is cleared by the host application\'s own '
+      + 'turn cleanup, which is unreliable here, so an app you stop can end up refusing every later '
+      + 'turn until the host application is relaunched. Listing is free and always safe; ordinary '
+      + 'computer use never needs a Stop.',
     // A whole JSON Schema object, exactly as the server's descriptors are
     // carried: the harness rejects anything that is not `type: "object"`.
     parameters: {

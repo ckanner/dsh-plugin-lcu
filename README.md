@@ -293,9 +293,25 @@ usually wants both:
 - **A delegated child cannot be asked for approval.** DSH only accepts a human answer for a live
   runtime root, so a subagent's LCU approval fails closed. Subagents can perform read-only work that
   needs no approval; anything that needs one must be driven from the top-level session.
-- **macOS turn cleanup can outlive the host's wait.** The signed helper occasionally answers the
-  `turn-ended` step slowly. The runtime keeps cleaning in the background and retries; the plugin blocks
-  the next call until it settles rather than acting on a half-torn-down desktop.
+- **A per-application Stop can outlive its session.** `computer_use_stop` — and pressing Esc on the
+  host application's "using your computer" banner — ask the runtime to stop using one application. That
+  request is cleared by the host application's own turn-ended cleanup, and that cleanup does not run
+  reliably here: its Apple Events step is refused, because macOS will not prompt a hardened-runtime
+  harness for automation. If an application then refuses every later turn with "explicitly stopped by
+  the user", quitting and relaunching the ChatGPT application clears it. **Ordinary use — screenshots,
+  clicks, typing, browser tabs — is unaffected and never needs a restart**; the plugin's tool
+  description says so, so a model does not stop an application on its own initiative.
+- **The `js` sandbox cannot write files.** Every write fails with `EPERM`, including in the temporary
+  directory, so a screenshot cannot be saved from inside `js`. Images are delivered to the harness as
+  attachments instead, and each stored image reports its host filesystem path in the tool result;
+  copying one into the workspace is a one-line `bash` call (`install -m 644 '<path>' <target>` — the
+  store keeps its objects mode 400). The plugin states both in the tool result and in the instructions
+  it injects.
+- **macOS permissions belong to the harness, not to the OpenAI helper.** macOS attributes a permission
+  request to the *responsible* process, which for anything the harness spawns is the harness itself.
+  Screen Recording and Accessibility must therefore be enabled for **DeepSeek Harness** in System
+  Settings; granting them only to ChatGPT or to "Codex Computer Use" is not enough, and macOS will not
+  prompt for the missing ones on its own.
 - **One LCU connection per Agent.** LCU's JavaScript session is per connection and its approvals are
   bound to a real session and turn, so sharing one connection across Agents would interleave both.
 - **`chrome` needs the extension.** Enabling the flag without the official ChatGPT extension, or without
