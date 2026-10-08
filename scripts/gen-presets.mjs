@@ -159,42 +159,6 @@ function setPresentationMode(lines, mode) {
   throw new Error('tool-presentation row has no `mode:` field')
 }
 
-/**
- * Ensure one `key: value` inside a row's `config:` block.
- *
- * DSH ships model selection enabled on the generic `subagent` row but not on
- * `subagent_codex`, so the Codex row's schema exposes only `description` and
- * `prompt`. A caller who asks for a specific Codex model and thinking level then
- * has nowhere to put it, and the tool they were told to use is the one tool that
- * cannot express the request — a recorded session worked around it by shelling
- * out to `codex exec`, leaving the harness's own delegation path unused. Enable
- * the same surface here instead of asking every user to hand-patch a block this
- * script owns and regenerates.
- *
- * Idempotent: a key that is already present is left exactly as it is.
- *
- * @param lines - the row list from the base preset.
- * @param rowId - the row to edit.
- * @param key - the config key to ensure.
- * @param value - the literal YAML value to write.
- * @returns the edited row list.
- */
-function setConfigValue(lines, rowId, key, value) {
-  const start = findRow(lines, rowId)
-  // `body` is a generator: materialize it, because two passes are needed.
-  const rows = [...body(lines, start)]
-  const configAt = rows.find((i) => /^\s*config:\s*$/.test(lines[i]))
-  if (configAt === undefined) throw new Error(`${rowId} row has no \`config:\` block`)
-  const configIndent = indentOf(lines[configAt])
-  const inside = rows.filter((i) => i > configAt && indentOf(lines[i]) > configIndent)
-  if (inside.some((i) => new RegExp(`^\\s*${key}:`).test(lines[i]))) return lines
-  const first = inside[0]
-  if (first === undefined) throw new Error(`${rowId} config block is empty`)
-  const next = [...lines]
-  next.splice(first, 0, `${' '.repeat(indentOf(lines[first]))}${key}: ${value}`)
-  return next
-}
-
 /** Extract the `plugins:` sub-tree (the row list) from a preset patch file. */
 function extractPlugins(lines) {
   const index = lines.findIndex((line) => /^\s*plugins:\s*$/.test(line))
@@ -217,13 +181,9 @@ function extractPlugins(lines) {
 
 function renderPreset(spec, basePlugins) {
   const plugins = spec.enable.reduce(enableRow, [...basePlugins])
-  // Codex delegation must expose the same model surface the generic subagent row
-  // already has, or "use Codex with this model and thinking level" is not a
-  // request the tool can carry.
-  const withModelSelection = setConfigValue(plugins, 'tool-subagent-codex', 'modelSelectionSettings', 'true')
   const withMode = spec.presentation === null
-    ? withModelSelection
-    : setPresentationMode(withModelSelection, spec.presentation)
+    ? plugins
+    : setPresentationMode(plugins, spec.presentation)
   const out = [
     `    - id: preset-${spec.id}`,
     "      name: '@deepseek-ai/dsh-agent-preset'",
