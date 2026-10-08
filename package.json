@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-lcu",
-  "version": "0.3.0",
+  "version": "0.3.4",
   "description": "Drive the desktop and Chrome from DeepSeek Harness using the computer-use runtime inside the ChatGPT desktop application.",
   "keywords": [
     "dsh-plugin",
@@ -37,6 +37,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "CHANGELOG.md",
     "lib",
     "helper",
     "cordis.patch.yml",
