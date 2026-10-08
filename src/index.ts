@@ -302,6 +302,11 @@ export function apply(ctx: Context, config: Config): void {
         env: plan.env,
         onElicitation: (request, elicitSignal) => presentApproval(agent, request, elicitSignal),
         onStderr: (line) => { ctx.logger.debug(`lcu: ${line}`) },
+        // The control channel decides whether a per-application Stop is reachable
+        // at all, and its decisions were invisible: `onDiag` existed on the
+        // connection but nothing passed it, so the one subsystem that can report
+        // "no service is connected" said nothing anywhere.
+        onDiag: (message) => { diag(`  ${message}`) },
       })
       await opened.connect(signal)
       first ??= opened
