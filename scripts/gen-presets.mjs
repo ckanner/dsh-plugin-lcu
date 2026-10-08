@@ -261,17 +261,59 @@ function foreignEntries(region) {
   const out = []
   let i = 0
   while (i < lines.length) {
-    // This script's own rows are indented, or the single `- insert:` shell.
-    if (/^- (?!insert:)\S/.test(lines[i])) {
+    // This script's own rows are indented, or the single `- insert:` shell. The
+    // separator is `\s+`, not one space: `-  id: x` is the same YAML and would
+    // otherwise be spliced away with the block.
+    if (/^-\s+(?!insert:)\S/.test(lines[i])) {
       const start = i
       i += 1
-      while (i < lines.length && !/^- (?!insert:)\S/.test(lines[i])) i += 1
+      while (i < lines.length && !/^-\s+(?!insert:)\S/.test(lines[i])) i += 1
       out.push(lines.slice(start, i).join('\n').replace(/\s+$/, ''))
       continue
     }
     i += 1
   }
   return out
+}
+
+/** The `id` a top-level entry declares, or `undefined` when it declares none. */
+function entryId(entry) {
+  return /^-\s+id:\s*(\S+)/m.exec(entry)?.[1]
+}
+
+/**
+ * Drop every top-level entry whose `id` is in `ids`, with everything under it.
+ *
+ * The entries `foreignEntries` collects carry the newest values the settings UI
+ * wrote, and they are emitted after the block so they win by the profile's
+ * id-merge. A copy already outside the region therefore has to go: without this,
+ * every later write inside the markers leaves another entry behind and the file
+ * grows by one on every run.
+ *
+ * @param text - a patch, or part of one.
+ * @param ids - the ids to remove.
+ * @returns the text without those entries.
+ */
+function withoutEntries(text, ids) {
+  if (ids.size === 0) return text
+  const lines = text.split('\n')
+  const kept = []
+  let i = 0
+  while (i < lines.length) {
+    if (!/^-\s+\S/.test(lines[i])) {
+      kept.push(lines[i])
+      i += 1
+      continue
+    }
+    const start = i
+    i += 1
+    while (i < lines.length && !/^-\s+\S/.test(lines[i])) i += 1
+    const body = lines.slice(start, i)
+    const id = entryId(body[0])
+    if (id !== undefined && ids.has(id)) continue
+    kept.push(...body)
+  }
+  return kept.join('\n')
 }
 
 function spliceBlock(text, block) {
@@ -286,7 +328,13 @@ function spliceBlock(text, block) {
       )
     }
     const kept = foreign.length === 0 ? '' : `\n${foreign.join('\n\n')}\n`
-    return text.slice(0, begin) + block + text.slice(end + END.length) + kept
+    // Only the ids actually being re-emitted, and only where they are not the
+    // entry being kept: `foreign` itself is what follows the block.
+    const ids = new Set(foreign.map(entryId).filter((id) => id !== undefined))
+    return withoutEntries(text.slice(0, begin), ids)
+      + block
+      + withoutEntries(text.slice(end + END.length), ids)
+      + kept
   }
   const separator = text.endsWith('\n') ? '\n' : '\n\n'
   return `${text}${separator}${block}\n`
