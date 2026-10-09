@@ -6,11 +6,11 @@
     "dsh-plugin",
     "deepseek-harness",
     "dsh",
+    "cordis",
     "computer-use",
     "browser-use",
     "cua",
     "chatgpt",
-    "desktop-automation",
     "macos"
   ],
   "license": "MIT",
@@ -18,11 +18,11 @@
     "name": "Kanner",
     "email": "kanner.chen@gmail.com"
   },
+  "homepage": "https://github.com/ckanner/dsh-plugin-lcu#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ckanner/dsh-plugin-lcu.git"
   },
-  "homepage": "https://github.com/ckanner/dsh-plugin-lcu#readme",
   "bugs": {
     "url": "https://github.com/ckanner/dsh-plugin-lcu/issues"
   },
