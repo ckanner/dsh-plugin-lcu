@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.6
+
+Metadata only; no behaviour change.
+
+The package's keywords and homepage now use the same vocabulary as the repository's topics:
+`deepseek-harness`, `dsh`, `cordis` and `dsh-plugin` plus the capabilities this package provides.
+
 ## 0.3.5
 
 Diagnostics only — no behaviour change.
