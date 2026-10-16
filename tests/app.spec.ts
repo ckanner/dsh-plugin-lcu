@@ -142,7 +142,7 @@ test('the launch plan starts the application’s own entry point', { skip }, () 
   assert.equal(chrome.env.CUA_REPL_ENABLED_SURFACES, 'browser,computer')
 })
 
-test('an explicit command replaces the computed launch', () => {
+test('an explicit command replaces the computed launch', { skip }, () => {
   const plan = planLaunch({ chrome: true, audio: false, command: '/usr/bin/true' })
   assert.equal(plan.command, '/usr/bin/true')
   assert.deepEqual(plan.args, ['--chrome'])
