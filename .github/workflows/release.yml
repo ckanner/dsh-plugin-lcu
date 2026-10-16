@@ -1,62 +1,156 @@
-# Publishing is a release, not a side effect of a push: `dsh plugin add
-# dsh-plugin-lcu` only resolves once the name exists on the registry, and an
-# artifact that is already published cannot be unpublished into a fix.
+# Publishing is a release, not a side effect of a push.
 #
-# Two ways in, and this workflow does not care which one the maintainer chose: a
-# repository NPM_TOKEN secret, or npm trusted publishing, where npm exchanges
-# this run's OIDC identity for a short-lived credential and no long-lived token
-# exists to leak.
+# One tag does both halves of a release, so the registry and this repository's
+# Releases page cannot drift apart: the run publishes only when the version is
+# new, and always records the GitHub Release. Pushing a tag for a version that is
+# already on the registry therefore backfills its Release instead of failing,
+# which is how the releases skipped while publishing by hand get recorded.
+#
+# Two ways in for the publish half, and the workflow does not care which one the
+# maintainer chose: a repository `NPM_TOKEN` secret, or npm trusted publishing,
+# where npm exchanges this run's OIDC identity for a short-lived credential and no
+# long-lived token exists to leak. The Release half needs neither — it uses the
+# run's own GITHUB_TOKEN, which is why `contents` is write below.
+#
+# Every check the CI lane runs has to pass here too, because an artifact that is
+# already on the registry cannot be unpublished into a fix.
 name: release
 
 on:
   push:
     tags: ['v*']
+  # Releasing the manifest's version by hand, creating the tag when it is absent.
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # Creating the GitHub Release, and attaching the packed tarball to it.
+  contents: write
   # Trusted publishing: npm accepts this run's OIDC identity in place of a token.
   id-token: write
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
+    env:
+      # Empty when the secret is absent, which is what selects the second step.
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.x'
-          cache: npm
+          # Node 22 is the lowest this package supports, so the artifact is built
+          # and published by the oldest runtime it claims to work on.
+          node-version: '22.x'
           registry-url: https://registry.npmjs.org
-      - run: npm ci
-      - name: Verify the tag names this version
-        if: startsWith(github.ref, 'refs/tags/v')
+
+      - name: Use an npm that knows trusted publishing
+        # Node 22 bundles npm 10, which has no OIDC exchange at all: with no token
+        # configured it stops at ENEEDAUTH instead of asking npm for a credential.
+        # Trusted publishing needs npm 11.5 or later.
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          npm install --global npm@latest
+          node --version
+          npm --version
+
+      - run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+      - name: Unit tests
+        # The connection suite talks to a real computer-use runtime and skips itself
+        # when none is installed, which is the case on CI.
+        run: npm test
+
+      - name: Resolve the version, and refuse a tag that does not match it
+        # A publish is not undoable, and an npm version can never be reused, so a
+        # mistyped tag would burn the number permanently.
+        run: |
           version="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_REF_TYPE" != 'tag' ]; then
+            # A manual run releases whatever the manifest says.
+            tag="$version"
+          fi
           if [ "$tag" != "$version" ]; then
-            echo "tag $GITHUB_REF_NAME does not match package version $version" >&2
+            echo "tag v$tag does not match package.json version $version" >&2
             exit 1
           fi
-      # Every check the CI lane runs has to pass here too.
-      - run: npm run typecheck
-      - run: npm test
-      # Idempotent: a tag whose version is already on the registry publishes
-      # nothing. Re-running a release, or tagging after a manual publish, must
-      # not turn into a red lane.
-      - name: Is this version already published?
-        id: check
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "Releasing dsh-plugin-lcu@$version"
+
+      - name: Ask the registry whether this version exists yet
+        id: registry
         run: |
-          version="$(node -p "require('./package.json').version")"
-          if npm view "dsh-plugin-lcu@$version" version >/dev/null 2>&1; then
+          if npm view "dsh-plugin-lcu@$VERSION" version >/dev/null 2>&1; then
             echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "dsh-plugin-lcu@$version is already on the registry; skipping publish."
           else
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Choose the publishing credential
+        # Decided from the secret itself in a shell step. setup-node exports a
+        # placeholder `NODE_AUTH_TOKEN` (`XXXXX-XXXXX-XXXXX-XXXXX`) once `registry-url`
+        # is set, so a condition that reads the environment cannot tell a real secret
+        # from that placeholder.
+        id: credential
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - if: steps.check.outputs.published == 'false'
-        run: npm publish --provenance --access public
+          TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "mode=token" >> "$GITHUB_OUTPUT"
+            echo "Publishing with the repository's NPM_TOKEN secret."
+          else
+            echo "mode=trusted" >> "$GITHUB_OUTPUT"
+            echo "No NPM_TOKEN secret is set; publishing through npm trusted publishing."
+          fi
+
+      - name: Publish with the repository's npm token
+        if: steps.registry.outputs.published == 'false' && steps.credential.outputs.mode == 'token'
         env:
+          # Stated here because setup-node's placeholder would otherwise win.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Publish through npm trusted publishing
+        # No secret: npm exchanges the id-token for a credential scoped to this
+        # workflow. Trusted publishing has to be configured for this repository on
+        # npmjs.com before the first run.
+        #
+        # npm prefers a configured token over the OIDC exchange, and setup-node's
+        # `.npmrc` points `_authToken` at the placeholder, so this step runs against
+        # an empty config: with no token to send, npm performs the exchange.
+        if: steps.registry.outputs.published == 'false' && steps.credential.outputs.mode == 'trusted'
+        env:
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/trusted-publishing.npmrc
+        run: |
+          : > "$NPM_CONFIG_USERCONFIG"
+          npm publish --access public --provenance
+
+      - name: Record a version that was published by hand
+        if: steps.registry.outputs.published == 'true'
+        run: |
+          echo "dsh-plugin-lcu@$VERSION is already on the registry." >> "$GITHUB_STEP_SUMMARY"
+          echo "This run records its GitHub Release and publishes nothing." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Pack the tarball the Release carries
+        # The asset keeps a version-free name so `releases/latest/download/…` is a
+        # stable address for the current build.
+        run: |
+          npm pack
+          mv dsh-plugin-lcu-*.tgz dsh-plugin-lcu.tgz
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" dsh-plugin-lcu.tgz --clobber
+          else
+            gh release create "v$VERSION" \
+              --title "v$VERSION" \
+              --generate-notes \
+              dsh-plugin-lcu.tgz
+          fi
