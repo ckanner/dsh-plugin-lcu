@@ -91,16 +91,19 @@ This writes a marked block into that profile's `cordis.patch.yml` containing two
 | Preset | Base | Adds |
 |---|---|---|
 | `daily` | the shipped `ptc` preset | a Codex delegation provider of its own |
-| `heavy` | the same, with `tool-presentation: both` | everything above, and this plugin attaches |
+| `heavy` | the same, with `tool-presentation: native` | everything above, and this plugin attaches |
 
 Re-run it after a DSH upgrade so the copies keep up. `--daily-only` emits just `daily`, `--dry-run`
-prints without writing, and `--out FILE` writes somewhere else. The official `tool-subagent-codex` row
-stays disabled, as the base ships it: a separate provider registers its own `subagent_codex`, and two
-rows registering that name in one scope collide.
+prints without writing, and `--out FILE` writes somewhere else. The official Codex tool is no longer
+a per-preset row: since DSH 0.2.1 the official bundle contributes a **global** `subagent_codex`, and
+a separate provider registers its own same-named tool per Agent for the generated presets, shadowing
+the global one. Two registrations in one scope still collide, so nothing may enable a same-name
+`tool-subagent` row beside that provider.
 
-> `heavy` sets the tool presentation to `both` on purpose. In pure `ptc` presentation the model only
-> sees `run_code`, so `js` would have to be nested as a JavaScript string inside another JavaScript
-> program. `both` keeps `js` directly callable.
+> `heavy` sets the tool presentation to `native` on purpose. DSH 0.2.1 removed the old `both` mode —
+> a preset declares one presentation, `native` or `ptc` — and in pure `ptc` presentation the model
+> only sees `run_code`, so `js` would have to be nested as a JavaScript string inside another
+> JavaScript program. `native` keeps `js` directly callable and gives up PTC for that preset.
 
 ### 3. Configure which modes get the capability
 

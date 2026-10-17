@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.7
+
+Documentation only; no behaviour change.
+
+The preset recipe now describes DSH 0.2.1's presentation modes: `heavy` uses `native`, because the old `both`
+mode was removed and a preset declares exactly one of `native | ptc`. It also records that the official
+`subagent_codex` is a global Host tool since 0.2.1, and that `dsh-subagent-codex-pro` shadows it per Agent for the
+generated presets rather than a per-preset disabled row switching it off.
+
 ## 0.3.6
 
 Metadata only; no behaviour change.

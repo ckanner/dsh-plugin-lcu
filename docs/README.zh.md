@@ -79,11 +79,11 @@ node dsh-preset-generator/src/gen-presets.mjs --profile ~/.dsh/profiles/<profile
 | preset | 基底 | 增加 |
 |---|---|---|
 | `daily` | 自带的 `ptc` preset | 一套自己的 Codex 委派 provider |
-| `heavy` | 同上，且 `tool-presentation: both` | 以上全部，且本插件接入 |
+| `heavy` | 同上，且 `tool-presentation: native` | 以上全部，且本插件接入 |
 
-DSH 升级后重跑一次，让副本跟上。`--daily-only` 只生成 `daily`；`--dry-run` 只打印不写；`--out FILE` 写到别处。官方的 `tool-subagent-codex` 行保持**禁用**（和基底一致）：另有一套 provider 自己注册 `subagent_codex`，而两行在同一个 scope 里注册同名工具会冲突。
+DSH 升级后重跑一次，让副本跟上。`--daily-only` 只生成 `daily`；`--dry-run` 只打印不写；`--out FILE` 写到别处。官方的 Codex 工具不再是 per-preset 行：从 DSH 0.2.1 起官方 bundle 提供的是**全局** `subagent_codex`，独立 provider 在这些生成的 preset 里按 Agent 注册同名工具，遮蔽全局那个。同一个 scope 内的两次注册仍会冲突，所以不能在这个 provider 之外再启用同名的 `tool-subagent` 行。
 
-> `heavy` 特意把工具呈现设为 `both`。纯 `ptc` 呈现下模型只看得到 `run_code`，`js` 就得嵌成另一个 JavaScript 程序里的字符串。`both` 让 `js` 可以被直接调用。
+> `heavy` 特意把工具呈现设为 `native`。DSH 0.2.1 移除了旧的 `both` 模式 —— 一个 preset 只能声明一种呈现，`native` 或 `ptc` —— 而纯 `ptc` 呈现下模型只看得到 `run_code`，`js` 就得嵌成另一个 JavaScript 程序里的字符串。`native` 让 `js` 可以被直接调用，代价是该 preset 放弃 PTC。
 
 ### 3. 配置哪些模式能用
 
