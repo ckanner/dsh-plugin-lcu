@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.8
+
+The Codex upgrade script works across DSH Desktop releases again, and its
+baseline now records `@openai/codex` 0.164.0.
+
+- Resolve the app-bundled pnpm from the location current Desktop builds use
+  (`runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs`), keeping the old
+  `runtime/pnpm/...` path as a fallback. The 0.2.1-rc.3 release moved it, and the
+  script's stale constant made every install fail with a null status.
+- Keep the two-space indent when rewriting an existing override line. Dropping
+  it turned the key into a top-level entry, so pnpm ignored the override and
+  installed the dependency's own 0.153.4 pin; the script then reported
+  "installed 0.153.4, wanted 0.164.0" instead of applying the target.
+- Include the spawn error when pnpm cannot start, instead of an empty detail.
+- Verified 0.164.0 through all three gates (handshake, protocol schema, real
+  turn) and recorded it in `scripts/codex-baseline.json`; this profile now pins
+  `@deepseek-ai/dsh-subagent-codex>@openai/codex` to 0.164.0.
+
 ## 0.3.7
 
 Documentation only; no behaviour change.

@@ -55,7 +55,16 @@ const CODEX_ENTRY = 'node_modules/@openai/codex/bin/codex.js'
 // fetch every OS/arch payload (~275 MB each).
 const OVERRIDE_KEY = '"@deepseek-ai/dsh-subagent-codex>@openai/codex"'
 const OVERRIDE_RE = /^\s*"@deepseek-ai\/dsh-subagent-codex>@openai\/codex":.*$/m
-const APP_PNPM = '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/pnpm/bin/pnpm.cjs'
+// The Desktop app bundles the pnpm the profile was installed with, and that
+// payload moves between releases: 0.2.1-rc.3 keeps it under primary-runtime,
+// while older builds used runtime/pnpm. Resolve the first one that exists —
+// a PATH pnpm is only a last resort, because a different pnpm may refuse this
+// profile's node_modules without a TTY.
+const APP_PNPM_CANDIDATES = [
+  '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs',
+  '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/pnpm/bin/pnpm.cjs',
+]
+const APP_PNPM = APP_PNPM_CANDIDATES.find((path) => existsSync(path))
 
 /**
  * The protocol surface dsh-subagent-codex/src/wire.ts actually uses.
@@ -129,7 +138,11 @@ function readOverride(text) {
 function writeOverride(text, version, key = OVERRIDE_KEY) {
   const line = `  ${key}: "${version}"`
   if (OVERRIDE_RE.test(text)) {
-    return text.replace(OVERRIDE_RE, line.trimStart())
+    // Keep the two-space indent: the replacement line lands inside the
+    // `overrides:` mapping. Dropping it (a previous bug) turned the key into a
+    // top-level entry, so pnpm silently ignored the override and installed the
+    // dependency's own pin instead.
+    return text.replace(OVERRIDE_RE, line)
   }
   if (/^overrides:/m.test(text)) {
     return text.replace(/^overrides:\s*$/m, `overrides:\n${line}`)
@@ -399,12 +412,15 @@ function install(profile, runner) {
     env: { ...process.env, CI: 'true' },
   })
   if (result.status !== 0) {
-    const detail = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
+    // spawnSync reports a failure to start (missing executable, EACCES) as a
+    // null status plus `error`; without it the message would be empty.
+    const spawnFailure = result.error === undefined ? '' : `${result.error.message}\n`
+    const detail = `${spawnFailure}${result.stdout ?? ''}\n${result.stderr ?? ''}`
       .split('\n')
       .filter((line) => line.trim() !== '' && !line.includes('NPM_TOKEN'))
       .slice(-25)
       .join('\n')
-    throw new Error(`pnpm install failed (${result.status}):\n${detail}`)
+    throw new Error(`pnpm install failed (${String(result.status)}):\n${detail}`)
   }
 }
 
@@ -417,7 +433,7 @@ function install(profile, runner) {
  */
 function resolvePnpm(explicit) {
   if (explicit !== undefined) return [explicit]
-  if (existsSync(APP_PNPM)) return [process.execPath, APP_PNPM]
+  if (APP_PNPM !== undefined) return [process.execPath, APP_PNPM]
   return ['pnpm']
 }
 
