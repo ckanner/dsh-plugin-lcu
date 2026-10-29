@@ -1,7 +1,7 @@
 {
-  "codex": "0.164.0",
-  "verifiedAt": "2026-10-25T13:28:39.458Z",
-  "previous": "0.160.1",
+  "codex": "0.165.0",
+  "verifiedAt": "2026-10-29T08:37:59.144Z",
+  "previous": "0.164.0",
   "gates": {
     "handshake": "ok",
     "schema": "ok",
