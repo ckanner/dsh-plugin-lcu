@@ -30,6 +30,7 @@ test('readCuaRequest normalizes the generic method call', () => {
   )
   assert.throws(() => readCuaRequest({}), /method/)
   assert.throws(() => readCuaRequest({ method: 'x', args: 'nope' }), /array/)
+  assert.throws(() => readCuaRequest({ method: '__proto__' }), /invalid method/)
 })
 
 test('the program-side proxy turns handles into routable method calls', async () => {
