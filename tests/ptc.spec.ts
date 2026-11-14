@@ -73,6 +73,22 @@ test('nested handle objects are decoded, not left as raw __handle values', async
   assert.equal(await tab.getTitle(), 'Example')
 })
 
+test('bridge decoding preserves runtime Image class and symbol identity', async () => {
+  const brand = Symbol('ptc.image')
+  class RuntimeImage {
+    [brand] = true
+    getMediaType() { return 'image/png' }
+  }
+  const image = new RuntimeImage()
+  const branded = { [brand]: true, id: 'image-2' }
+  const cua = connectCua(async () => ({ image, nested: [image, branded] }))
+  const result = await cua.getState!() as any
+  assert.equal(result.image, image)
+  assert.equal(result.image.getMediaType(), 'image/png')
+  assert.equal(result.nested[0], image)
+  assert.equal(result.nested[1], branded)
+})
+
 test('the host tool sends a bridge program and returns its JSON value', async () => {
   const calls: { name: string, args: Readonly<Record<string, unknown>> }[] = []
   const values = [{ state: 'ready' }, { __handle: 'h1' }]

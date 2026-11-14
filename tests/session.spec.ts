@@ -103,7 +103,7 @@ test('a changed application replaces the connection, and only once', async () =>
   }
 })
 
-test('every delegated call goes through the replacement', async () => {
+test('turn cleanup reaches its original runtime while new control calls follow the replacement', async () => {
   const { session, opened, setGeneration } = await openSession()
   try {
     setGeneration('generation-2')
@@ -111,8 +111,8 @@ test('every delegated call goes through the replacement', async () => {
     await session.controlStatus('s', 't')
     await session.controlStop('s', 't', 'com.apple.finder')
     assert.equal(opened.length, 2)
-    assert.deepEqual(opened[1]?.calls, ['turnEnded:s/t', 'controlStatus', 'controlStop:com.apple.finder'])
-    assert.deepEqual(opened[0]?.calls, [], 'the stale connection received nothing')
+    assert.deepEqual(opened[1]?.calls, ['controlStatus', 'controlStop:com.apple.finder'])
+    assert.deepEqual(opened[0]?.calls, ['turnEnded:s/t'], 'cleanup must target the runtime that owned the turn')
   } finally {
     await session.close()
   }
@@ -200,6 +200,53 @@ test('closing retires the connection and refuses later calls', async () => {
   // Closing twice is not an error, and does not resurrect anything.
   await session.close()
   assert.equal(opened.length, 1)
+})
+
+test('pinned startup rejects an application update during the handshake and closes that runtime', async () => {
+  const opened = fakeConnection()
+  let generation = 'before'
+  await assert.rejects(() => ManagedSession.open({
+    generationPolicy: 'pin',
+    generation: () => generation,
+    connect: async () => { generation = 'after'; return opened.connection },
+  }), /GENERATION_CHANGED/)
+  assert.equal(opened.closed(), true)
+  assert.deepEqual(opened.calls, [])
+})
+
+test('pinned startup does not spawn a runtime with an unreadable application identity', async () => {
+  let spawned = false
+  await assert.rejects(() => ManagedSession.open({
+    generationPolicy: 'pin',
+    generation: () => { throw new Error('bundle unavailable') },
+    connect: async () => { spawned = true; return fakeConnection().connection },
+  }), /bundle unavailable/)
+  assert.equal(spawned, false)
+})
+
+test('closing during replacement retires both runtimes and cannot resurrect a session', async () => {
+  const first = fakeConnection(), next = fakeConnection()
+  let generation = 'before'
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let started!: () => void
+  const starting = new Promise<void>(resolve => { started = resolve })
+  const session = await ManagedSession.open({
+    generation: () => generation,
+    connect: async reason => {
+      if (reason === 'initial') return first.connection
+      started(); await gate; return next.connection
+    },
+  })
+  generation = 'after'
+  const call = assert.rejects(() => session.callTool('js', {}), /closed/)
+  await starting
+  await session.close()
+  release()
+  await call
+  assert.equal(first.closed(), true)
+  assert.equal(next.closed(), true)
+  assert.deepEqual(next.calls, [])
 })
 
 test('the delegated surface reflects the current connection', async () => {

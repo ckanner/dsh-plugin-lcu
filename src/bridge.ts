@@ -4,7 +4,7 @@
  * PTC programs run in the harness's own Node runtime, so they cannot reach the
  * objects that live inside the ChatGPT application's CUA REPL directly. This
  * module exposes those objects as a small proxy tree: every method call becomes
- * one `tools.cua` binding call, and every object returned by the runtime becomes
+ * one `tools.lcu_cua` binding call, and every object returned by the runtime becomes
  * an opaque handle whose methods are routed back through the same binding.
  *
  * The file is imported from generated `run_code` programs, so it must stay
@@ -40,7 +40,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 /**
  * Build the `cua` object used by PTC programs.
  *
- * @param call - the `tools.cua` binding supplied by the generated SDK.
+ * @param call - the `tools.lcu_cua` binding supplied by the generated SDK.
  * @param log - optional sink for runtime text; currently unused but kept so a
  *   caller can pass the same logger as the generic CUA bridge.
  * @returns a proxy whose top-level and returned-object methods all route through
@@ -85,6 +85,8 @@ export function connectCua(call: CuaBridgeCall, log?: (text: string) => void): C
       for (const [key, child] of Object.entries(properties)) decoded[key] = decode(child)
       return makeHandle(__handle, decoded)
     }
+    if (isRecord(value) && (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null
+      || Object.getOwnPropertySymbols(value).length > 0)) return value
     if (isRecord(value)) {
       const out: Record<string, unknown> = {}
       for (const [key, child] of Object.entries(value)) out[key] = decode(child)

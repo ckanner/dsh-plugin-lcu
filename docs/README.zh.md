@@ -14,6 +14,7 @@
 - [前置条件](#前置条件)
 - [安装](#安装)
 - [使用](#使用)
+- [SDK 受管挂载](#sdk-受管挂载)
 - [配置](#配置)
 - [批准与安全模型](#批准与安全模型)
 - [实现说明](#实现说明)
@@ -28,20 +29,20 @@
 
 | 工具 | 作用 |
 |---|---|
-| `cua` | 到桌面/浏览器运行时的 PTC bridge。`cua.getState`、`cua.getApp`、`cua.getBrowser`、`cua.getTab` 和 `cua.createBrowserTab` 返回值或 handle；handle 上的截图、点击、输入、AX 读取都走同一个 binding。 |
+| `lcu_cua` | 到桌面/浏览器运行时的 PTC bridge。`cua.getState`、`cua.getApp`、`cua.getBrowser`、`cua.getTab` 和 `cua.createBrowserTab` 返回值或 handle；handle 上的截图、点击、输入、AX 读取都走同一个 binding。 |
 
 插件不再暴露 native `js` 工具。PTC 程序用 `connectCua` 初始化，然后按原来的对象 API 使用：
 
 ```ts
 var { connectCua } = await import('<profile>/node_modules/dsh-plugin-lcu/lib/bridge.js')
-var cua = connectCua((request) => tools.cua(request), text => console.log(text))
+var cua = connectCua((request) => tools.lcu_cua(request), text => console.log(text))
 const state = await cua.getState()
 const app = await cua.getApp('Finder')
 ```
 
 `cua.stopApp(app?)` 列出或释放持有的应用；`cua.documentation()` 返回运行时 API 手册；`cua.reset()` 清除运行时。原来的宿主专用 `turn_ended` / `js_add_node_module_dir` 仍是内部工具，不展示给模型。
 
-截图通过 DSH 的附件存储以持久图片返回，所以声明了图像输入的模型路由**真的能看见屏幕**。
+当前路由声明图片输入时，截图通过 DSH 附件存储准备投影。图片投影、模型实际接收、附着到 run 证据是三个独立事实，详见[媒体契约](MANAGED.zh.md#ptc代理句柄和图片)。
 
 ## 前置条件
 
@@ -80,12 +81,12 @@ node dsh-preset-generator/src/gen-presets.mjs --profile ~/.dsh/profiles/<profile
 
 | preset | 基底 | 增加 |
 |---|---|---|
-| `daily` | 自带的 `ptc` preset | 一套自己的 Codex 委派 provider |
-| `heavy` | 同上，且 `tool-executor-ptc` | 以上全部，且接入 PTC `cua` Computer/Browser bridge |
+| `daily` | 自带的 `ptc` preset | 委派 provider；LCU 白名单包含该 id 时挂载 LCU |
+| `heavy` | 自带的 `ptc` preset | 委派 provider；LCU 白名单包含该 id 时挂载 LCU |
 
 DSH 升级后重跑一次，让副本跟上。`--daily-only` 只生成 `daily`；`--dry-run` 只打印不写；`--out FILE` 写到别处。官方的 Codex 工具不再是 per-preset 行：从 DSH 0.2.1 起官方 bundle 提供的是**全局** `subagent_codex`，独立 provider 在这些生成的 preset 里按 Agent 注册同名工具，遮蔽全局那个。同一个 scope 内的两次注册仍会冲突，所以不能在这个 provider 之外再启用同名的 `tool-subagent` 行。
 
-> 两个 preset 都使用 PTC。插件的 PTC bridge 把运行时的 `cua` 对象变成 `tools.cua` binding，模型写一个 `run_code` 程序即可，不需要把 `js` 字符串嵌进另一个 JavaScript 程序。
+> 两个 preset 都使用 PTC。插件的 PTC bridge 把运行时的 `cua` 对象变成 `tools.lcu_cua` binding，模型写一个 `run_code` 程序即可，不需要把 `js` 字符串嵌进另一个 JavaScript 程序。
 
 ### 3. 配置哪些模式能用
 
@@ -152,6 +153,10 @@ config:
 打开 Safari，去 example.com，把页面标题读回来。
 ```
 
+## SDK 受管挂载
+
+调度器可通过 `dsh-plugin-lcu/managed` 给真实 SDK root 或已准入后代显式挂载 LCU，使用真实身份、GUI 租约、会等待的取消/清理回执和媒体事实，不继承或假冒桌面 preset。详见[公开 API 与生命周期契约](MANAGED.zh.md)。
+
 ## 配置
 
 | 字段 | 默认 | 含义 |
@@ -202,7 +207,9 @@ src/connection.ts   MCP 客户端：握手、工具发现、调用、elicitation
 src/approval.ts     批准形状识别与 label→value 映射
 src/host-guard.ts   防自我批准的守卫
 src/tool.ts         工具定义、文本投影、持久截图
-src/index.ts        插件：按 Agent 挂载、指令、turn_ended、批准
+src/index.ts        桌面插件：按 preset 和 Agent 挂载
+src/managed.ts      正式 SDK 挂载、资源准入、回执和证据事实
+src/authority.ts    共享的 exact app/origin 授权
 src/control.ts      relay：把运行时的控制 API 在插件与 wrapper 之间搬运
 src/session.ts      连接门面，跟随应用更新
 src/diag.ts         attach/批准 诊断日志
@@ -272,12 +279,12 @@ helper/sky-service.mjs  运行时的 Sky 服务：turn-ended 钩子 + 控制通�
 
 ## 已知限制与未做的工作
 
-- **被委派的子代理无法被询问批准。** DSH 只接受来自活跃 runtime root 的人的回答，所以子代理的批准会 fail closed。子代理可以做不需要批准的只读工作；需要批准的事必须从顶层会话驱动。
+- **人的批准取决于 DSH 活跃 runtime root。** 提问服务不能展示某个子 Agent 的问题时，该请求会 fail closed；受管后代仍可使用已批准目标，不限制为只读角色，也不替换其真实身份。
 - **按应用的 Stop 会被"请求它的那个回合"释放。** `cua.stopApp()`（以及在宿主应用的"正在使用你的电脑"横幅上按 Esc）会请求运行时**在当前回合内**停用某一个应用。插件通过应用自己的 IPC 执行宿主应用的 turn-ended 清理，所以**下一个回合可以重新使用那个应用**；不带参数的 `cua.stopApp()` 会报告当前持有哪些。如果某应用后续每个回合仍被拒绝，说明那次清理失败了，日志会写明。**常规使用 —— 截图、点击、输入、浏览器标签页 —— 不受影响**；插件的工具描述也这么写，所以模型不会自行去停用某个应用。
 - **`js` 沙箱不能写文件。** 每一次写入都以 `EPERM` 失败，**包括临时目录**，所以截图无法从 `js` 里保存。图片改为以附件形式交给 harness，每张存下来的图都会在工具结果里带上它的宿主文件系统路径；把它复制进工作区是一行 `bash`（`install -m 644 '<path>' <target>` —— 存储对象的模式是 400）。插件在工具结果和注入的指令里都写了这两点。
 - **macOS 权限属于 harness，不属于 OpenAI 助手。** macOS 把权限请求归给**负责进程**，而 harness 派生的一切都归给 harness 自己。所以屏幕录制和辅助功能必须给 **DeepSeek Harness** 打开；只给 ChatGPT 或 "Codex Computer Use" 是不够的，而且 macOS **不会自己弹窗**询问缺失的那些。
 - **没有 Codex 账号时的浏览器面还没接。** 驱动页面靠桌面应用注册的 native messaging host。那台"没有 Codex 应用"的机器上需要的 relay（强制扩展的 agent-request header）还没有实现。
-- **应用在会话运行期间更新，只做了警告。** 运行时是从应用更新时会替换的文件里执行的，所以长会话可能同时跑两代文件。应用更新后请重启 harness。
+- **应用更新会改变运行时代次。** 桌面会话在下一次调用时重新连接；managed 会话拒绝改变或无法读取的代次，须先清理再重新准入。句柄绑定 runtime epoch，更换或 reset 后必须重新获取。
 - **每个 Agent 一个连接。** 运行时的 JavaScript 会话是按连接隔离的，它的批准绑定到真实的会话和回合，所以让多个 Agent 共用一个连接会让两者交错。
 - **未在 Linux / Windows 上验证。** 见[前置条件](#前置条件)。
 
@@ -288,6 +295,7 @@ npm install
 npm run typecheck     # strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes
 npm run build         # 产出 lib/
 npm test              # node --test，无需构建
+npm run test:packed   # 通过真实包导出消费构建产物
 ```
 
 连接与启动器测试会与**真实的**已安装计算机使用运行时通信，应用不存在时自动跳过，所以 `npm test` 在本地有意义、在 CI 上也能过。批准、投影、守卫和 wrapper 那几套是纯函数，始终会跑。

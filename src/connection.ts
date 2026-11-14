@@ -216,7 +216,7 @@ export async function resolveElicitation(
   request: LcuElicitationRequest,
   activeCalls: ReadonlySet<AbortSignal> = new Set(),
 ): Promise<LcuElicitationResponse> {
-  if (handler === undefined) return { action: 'cancel' }
+  if (handler === undefined || [...activeCalls].some(signal => signal.aborted)) return { action: 'cancel' }
   const abort = new AbortController()
   const signal = AbortSignal.any([abort.signal, ...activeCalls])
   const dismissed = new Promise<LcuElicitationResponse>((resolve) => {
@@ -229,6 +229,7 @@ export async function resolveElicitation(
   } catch {
     return { action: 'cancel' }
   }
+  if (signal.aborted) return { action: 'cancel' }
   if (answer?.action === 'accept' || answer?.action === 'decline' || answer?.action === 'cancel') return answer
   return { action: 'cancel' }
 }
@@ -249,6 +250,8 @@ export class LcuConnection {
   #instructions = ''
   #serverInfo: { name?: string; version?: string } = {}
   #closed = false
+  #spawnFailed = false
+  #closing: Promise<void> | undefined
   #stderrBuffer = ''
   #activeCalls = new Set<AbortSignal>()
   #controlDirectory: string | undefined
@@ -345,6 +348,10 @@ export class LcuConnection {
       throw new LcuError('spawn', `could not start ${this.#options.command}`, error)
     }
     this.#child = child
+    child.on('error', error => {
+      if (child.pid === undefined) this.#spawnFailed = true
+      this.#failAll(new LcuError('spawn', `runtime process failed: ${error.message}`, error))
+    })
     child.stderr?.on('data', (chunk: Buffer) => this.#consumeStderr(chunk.toString()))
     child.on('exit', (code, signalName) => {
       const detail = signalName === null ? `exit ${String(code)}` : `signal ${signalName}`
@@ -388,6 +395,8 @@ export class LcuConnection {
       readonly turnId?: string
       /** The host's tool-call id, forwarded as `call_id` when available. */
       readonly callId?: string
+      /** Checked by the managed facade before dispatch; never sent as authority to the runtime. */
+      readonly expectedEpoch?: string
     } = {},
   ): Promise<LcuCallResult> {
     const result = await this.#request(
@@ -596,30 +605,33 @@ export class LcuConnection {
   }
 
   async close(): Promise<void> {
+    if (this.#closing !== undefined) return this.#closing
     this.#closed = true
     this.#failAll(new LcuError('spawn', 'connection closed'))
+    const pending = this.#closeAndVerify()
+    this.#closing = pending
+    try { await pending } catch (error) { this.#closing = undefined; throw error }
+  }
+
+  async #closeAndVerify(): Promise<void> {
+    const child = this.#child
+    if (child !== undefined && !this.#spawnFailed && child.exitCode === null && child.signalCode === null) {
+      try { child.stdin?.end() } catch { /* continue to bounded signals */ }
+      if (!await this.#exited(child, 5_000)) {
+        child.kill('SIGTERM')
+        if (!await this.#exited(child, 3_000)) {
+          child.kill('SIGKILL')
+          if (!await this.#exited(child, 2_000)) {
+            throw new LcuError('spawn', 'runtime exit is unconfirmed; cleanup responsibility remains held', undefined, 'LCU_CLEANUP_UNKNOWN')
+          }
+        }
+      }
+    }
+    // Keep the control relay alive while the runtime performs its final cleanup.
     await this.#controlServer?.close()
     this.#controlServer = undefined
-    const child = this.#child
     this.#child = undefined
-    try {
-      if (child === undefined || child.exitCode !== null) return
-      try {
-        child.stdin?.end()
-      } catch {
-        // An already-broken stdin just means we fall through to signalling.
-      }
-      if (await this.#exited(child, 5_000)) return
-      child.kill('SIGTERM')
-      if (await this.#exited(child, 3_000)) return
-      child.kill('SIGKILL')
-      await this.#exited(child, 2_000)
-    } finally {
-      // Always. A socket in a directory nobody removes is a leak per connection,
-      // and the earlier version left one behind on every path that had to signal
-      // the child rather than have it exit on stdin.
-      this.#removeControlDirectory()
-    }
+    this.#removeControlDirectory()
   }
 
   /** Resolve `true` once the child has exited, or `false` after `timeoutMs`. */
@@ -674,6 +686,7 @@ export class LcuConnection {
   }
 
   async #onServerMessage(message: WireMessage): Promise<void> {
+    if (this.#closed) return
     const id = message.id
     if (message.method === 'notifications/tools/list_changed') {
       try {
@@ -686,9 +699,9 @@ export class LcuConnection {
     // Requests from the server are the elicitation surface; answer or cancel.
     if (id === undefined) return
     if (message.method === 'elicitation/create') {
-      const request = (message.params ?? {}) as LcuElicitationRequest
+      const request = { ...(message.params ?? {}), requestId: id } as LcuElicitationRequest
       const response = await this.#answerElicitation(request)
-      this.#respond(id, response as unknown as Record<string, unknown>)
+      if (!this.#closed) this.#respond(id, response as unknown as Record<string, unknown>)
       return
     }
     // Unknown server requests fail closed rather than hanging the child.
@@ -740,16 +753,22 @@ export class LcuConnection {
     if (signal !== undefined) this.#activeCalls.add(signal)
     const id = this.#nextId++
     return new Promise<Record<string, unknown>>((resolve, reject) => {
+      const cancelRemote = (reason: string): void => {
+        try { this.#notify('notifications/cancelled', { requestId: id, reason }) } catch { /* cleanup still owns the remote outcome */ }
+      }
       const onAbort = (): void => {
-        this.#pending.delete(id)
-        reject(new LcuError(stage, `${method} was aborted`))
+        if (!this.#pending.delete(id)) return
+        cancelRemote('host call aborted')
+        cleanup()
+        reject(new LcuError(stage, `${method} was aborted`, undefined, 'LCU_REQUEST_ABORTED'))
       }
       const timer = timeoutMs >= NO_APPROVAL_TIMEOUT_MS
         ? undefined
         : setTimeout(() => {
-          this.#pending.delete(id)
-          signal?.removeEventListener('abort', onAbort)
-          reject(new LcuError(stage, `${method} timed out after ${String(timeoutMs)}ms`))
+          if (!this.#pending.delete(id)) return
+          cancelRemote('host call deadline expired')
+          cleanup()
+          reject(new LcuError(stage, `${method} timed out after ${String(timeoutMs)}ms`, undefined, 'LCU_REQUEST_TIMEOUT'))
         }, timeoutMs)
       const cleanup = (): void => {
         if (timer !== undefined) clearTimeout(timer)

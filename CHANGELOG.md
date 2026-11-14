@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0
+
+Managed SDK computer use and an explicit PTC/media contract.
+
+- Export `dsh-plugin-lcu/managed` for real Agent attachment without preset-header fabrication; require host-owned identity, lease verification and durable event callbacks.
+- Admit roots and real descendants with shared invocation leases, while serializing every complete GUI operation per resource across Agents. Retain unknown cleanup as a resource blocker.
+- Name the structured RPC tool `lcu_cua` so DSH PTC image special-casing cannot replace callable JSON handles. The program object remains `cua`; update hand-written `tools.cua` bindings. Preserve runtime Image identity and scope handles to runtime epochs.
+- Pin managed runtime generations, propagate abort to wire cancellation, await turn and process cleanup, and expose separate cleanup receipts. The trusted wrapper now reports failed application IPC cleanup instead of silently treating it as success.
+- Revoke desktop CUA tools immediately when a session switches to a disallowed preset, cancel in-flight calls and await the original runtime's turn cleanup before admitting a replacement. Failed startup no longer leaks a child process.
+- Detect application updates during runtime startup and retire a replacement that finishes after its session closes. Recheck the live Agent and lease after asynchronous approval boundaries so late answers cannot revive a revoked owner.
+- Preserve original app/origin approvals and real Agent identity; managed mode cannot enable the legacy host-approval test override.
+- Emit media hashes, attachment references, model-route facts and explicit unverified model delivery/run evidence states.
+- Support the Node 22.18+ runtime used by Flywheel and current Node 24 releases.
+- Exercise the public managed API through a real subprocess MCP fixture and a normally npm-installed packed consumer with exact host peers; explicitly admit the supported DSH prerelease tuples. Document remaining target-Mac and DSH executor probes.
+
 ## 0.4.2
 
 Expose read-only scalar properties on PTC handles.
