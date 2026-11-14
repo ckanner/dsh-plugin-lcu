@@ -38,7 +38,7 @@ const HOOK_TIMEOUT_MS = 4_000
 const CALL_TIMEOUT_SECONDS = 15
 /** Bound the remembered turn identities, so a long session cannot grow without limit. */
 const METADATA_LIMIT = 128
-/** Give up on a cleanup that will not settle, rather than wedging every later call. */
+/** Bound automatic retries; exhausted cleanup remains unknown and blocks actions. */
 const CLEANUP_ATTEMPTS = 3
 
 let original
@@ -127,8 +127,7 @@ async function settlePending() {
   cleanupInFlight = (async () => {
     for (const [key, item] of pending) {
       if (item.attempts >= CLEANUP_ATTEMPTS) {
-        console.error(`dsh-plugin-lcu: giving up on turn cleanup for ${item.turn_id} after ${item.attempts} attempts`)
-        pending.delete(key)
+        lastReport = `unconfirmed turn=${item.turn_id} after ${item.attempts} attempts`
         continue
       }
       item.attempts += 1
@@ -136,6 +135,7 @@ async function settlePending() {
       try {
         await cleanUp(item)
         pending.delete(key)
+        endControlTurn(item.session_id, item.turn_id)
         // Reported because the alternative is silence: a cleanup that never runs
         // looks exactly like one that ran, until an application refuses a later
         // turn for reasons the user cannot see.
@@ -144,7 +144,7 @@ async function settlePending() {
       } catch (error) {
         // Leave it pending: the next request retries, which is what keeps a slow
         // application from losing the cleanup entirely. The attempt count above
-        // is what stops a permanent failure from wedging the session.
+        // bounds automatic work; an exhausted item must never become success.
         lastReport = `failed turn=${item.turn_id} attempt=${item.attempts}/${CLEANUP_ATTEMPTS}: ${String(error)}`
         console.error(`dsh-plugin-lcu: turn cleanup ${lastReport}`)
       }
@@ -167,7 +167,8 @@ function register() {
       if (typeof session !== 'string' || session.trim() === '') throw fail('a turn-ended hook arrived without a session')
       if (typeof turn !== 'string' || turn.trim() === '') throw fail('a turn-ended hook arrived without a turn')
       const key = JSON.stringify([session, turn])
-      const carried = metadata.get(key)
+      const prior = pending.get(key)
+      const carried = metadata.get(key) ?? prior?.metadata
       metadata.delete(key)
       trace(`hook lookup ${key} -> ${carried === undefined ? 'no metadata' : 'found'}`)
       // A turn that carried no identity has nothing to send the application, so
@@ -178,9 +179,9 @@ function register() {
         lastReport = `no metadata for turn=${turn} (hook fired, known=${metadata.size})`
         return
       }
-      pending.set(key, { session_id: session, turn_id: turn, metadata: carried, attempts: 0 })
-      endControlTurn(session, turn)
+      if (prior === undefined) pending.set(key, { session_id: session, turn_id: turn, metadata: carried, attempts: 0 })
       await settlePending()
+      if (pending.has(key)) throw fail(`LCU_CLEANUP_UNKNOWN: application cleanup is unconfirmed for turn=${turn}`)
     },
   })
   registered = true
@@ -448,6 +449,7 @@ export async function handleRpc(request) {
   // A previous turn's cleanup is retried before the next request, because the
   // application refuses some actions while it still believes that turn is open.
   await settlePending()
+  if (pending.size > 0) throw fail('LCU_CLEANUP_UNKNOWN: previous application cleanup is unconfirmed; GUI actions remain blocked')
 
   const rt = runtime()
   const servicePath = rt?.env?.DSH_SKY_SERVICE_PATH

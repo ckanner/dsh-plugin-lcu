@@ -114,8 +114,8 @@ export async function ancestorBundleIds(): Promise<ReadonlySet<string>> {
  * @param app - the app the runtime is asking about: a display name, bundle id, or path.
  * @returns `true` when the request must be declined without asking the user.
  */
-export async function isAgentHostApp(app: string): Promise<boolean> {
-  if (process.env[OVERRIDE_ENV] === '1') return false
+export async function isAgentHostApp(app: string, options: { allowTestOverride?: boolean } = {}): Promise<boolean> {
+  if (options.allowTestOverride !== false && process.env[OVERRIDE_ENV] === '1') return false
   const candidate = app.trim()
   if (candidate === '') return false
 

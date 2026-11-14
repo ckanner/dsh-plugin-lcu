@@ -19,6 +19,7 @@ downloaded, rewritten or authenticated.
 - [Requirements](#requirements)
 - [Install](#install)
 - [Use](#use)
+- [Managed SDK attachment](#managed-sdk-attachment)
 - [Configuration](#configuration)
 - [Approvals and the security model](#approvals-and-the-security-model)
 - [Understand the implementation](#understand-the-implementation)
@@ -33,14 +34,14 @@ downloaded, rewritten or authenticated.
 
 | Tool | What it does |
 |---|---|
-| `cua` | The PTC bridge to the desktop/browser runtime. `cua.getState`, `cua.getApp`, `cua.getBrowser`, `cua.getTab` and `cua.createBrowserTab` return values or handles; handle methods (screenshots, clicks, typing, AX reads) run through the same binding. |
+| `lcu_cua` | The PTC bridge to the desktop/browser runtime. `cua.getState`, `cua.getApp`, `cua.getBrowser`, `cua.getTab` and `cua.createBrowserTab` return values or handles; handle methods (screenshots, clicks, typing, AX reads) run through the same binding. |
 
 The plugin adds the bridge, not a native `js` tool. PTC programs initialize it with
 `connectCua` and use the runtime exactly like the old `cua` object:
 
 ```ts
 var { connectCua } = await import('<profile>/node_modules/dsh-plugin-lcu/lib/bridge.js')
-var cua = connectCua((request) => tools.cua(request), text => console.log(text))
+var cua = connectCua((request) => tools.lcu_cua(request), text => console.log(text))
 const state = await cua.getState()
 const app = await cua.getApp('Finder')
 ```
@@ -49,8 +50,8 @@ const app = await cua.getApp('Finder')
 runtime. The old host-only `turn_ended` / `js_add_node_module_dir` tools remain
 internal and are never shown to the model.
 
-Screenshots arrive as durable images through DSH's attachment store, so a model route that declares
-image input can actually look at the screen.
+Screenshots are prepared through DSH's attachment store when the active route declares image input.
+Projection, model delivery, and attachment to a run are separate facts; see the [managed media contract](docs/MANAGED.md#ptc-and-media-contract).
 
 ## Requirements
 
@@ -94,8 +95,8 @@ This writes a marked block into that profile's `cordis.patch.yml` containing two
 
 | Preset | Base | Adds |
 |---|---|---|
-| `daily` | the shipped `ptc` preset | a Codex delegation provider of its own |
-| `heavy` | the same, with `tool-executor-ptc` | everything above, plus the PTC `cua` Computer/Browser bridge |
+| `daily` | the shipped `ptc` preset | its delegation provider; LCU when included in the plugin allowlist |
+| `heavy` | the shipped `ptc` preset | its delegation provider; LCU when included in the plugin allowlist |
 
 Re-run it after a DSH upgrade so the copies keep up. `--daily-only` emits just `daily`, `--dry-run`
 prints without writing, and `--out FILE` writes somewhere else. The official Codex tool is no longer
@@ -105,7 +106,7 @@ the global one. Two registrations in one scope still collide, so nothing may ena
 `tool-subagent` row beside that provider.
 
 > Both presets use PTC. The plugin's PTC bridge turns the runtime's `cua` object into a
-> `tools.cua` binding, so the model writes one `run_code` program instead of nesting a
+> `tools.lcu_cua` binding, so the model writes one `run_code` program instead of nesting a
 > `js` string inside another JavaScript program.
 
 ### 3. Configure which modes get the capability
@@ -181,6 +182,13 @@ List my current Chrome tabs.
 Open Safari, go to example.com and read the page title.
 ```
 
+## Managed SDK attachment
+
+Schedulers can explicitly mount LCU on a live SDK root or admitted descendant through
+`dsh-plugin-lcu/managed`, with real identity, GUI lease admission, awaited cancellation/cleanup
+receipts, and media facts. This does not inherit or impersonate a desktop preset.
+See the [public API and lifecycle contract](docs/MANAGED.md).
+
 ## Configuration
 
 | Field | Default | Meaning |
@@ -245,7 +253,9 @@ src/connection.ts   the MCP client: handshake, tool discovery, calls, elicitatio
 src/approval.ts     approval-shape recognition and label→value mapping
 src/host-guard.ts   the anti-self-approval guard
 src/tool.ts         tool definitions, text projection, durable screenshots
-src/index.ts        the plugin: per-Agent attach, instructions, turn_ended, approvals
+src/index.ts        the desktop plugin: preset-driven per-Agent attachment
+src/managed.ts      public SDK attachment, resource admission, receipts and evidence facts
+src/authority.ts    shared exact app/origin authorization
 src/control.ts      the relay that carries the runtime's control API to and from the wrapper
 src/session.ts      the connection, following the application across an update
 src/diag.ts         the attach/approval diagnostic log
@@ -363,9 +373,9 @@ usually wants both:
 
 ## Known limitations and deferred work
 
-- **A delegated child cannot be asked for approval.** DSH only accepts a human answer for a live
-  runtime root, so a subagent's approval fails closed. Subagents can perform read-only work that
-  needs no approval; anything that needs one must be driven from the top-level session.
+- **Human approval depends on DSH's active runtime root.** A child the question service cannot present
+  a question for fails closed; a managed descendant can still use already authorized targets. Its
+  actual identity is preserved, and the plugin does not impose a read-only role restriction.
 - **A per-application Stop is released by the turn that asked for it.** `cua.stopApp()` — and pressing
   Esc on the host application's "using your computer" banner — ask the runtime to stop using one application
   for the current turn. The plugin performs the host application's turn-ended cleanup through its own IPC, so
@@ -387,9 +397,9 @@ usually wants both:
 - **A browser surface without a Codex account is not wired up.** Driving a page works through the native
   messaging host the desktop application registers. The relay that makes it work on a machine with no Codex
   app present — forcing the extension's agent-request header — is not implemented.
-- **The application updating under a running session is only warned about.** The runtime is executed from
-  files the application replaces when it updates, so a long session can run a mix of two generations.
-  Restart the harness after the application updates.
+- **An application upgrade changes the runtime generation.** Desktop sessions reconnect at the next call;
+  managed sessions reject a changed or unreadable generation and require cleanup plus new admission.
+  Proxy handles are bound to one generation and must be reacquired after replacement or reset.
 - **One connection per Agent.** The runtime's JavaScript session is per connection and its approvals are
   bound to a real session and turn, so sharing one connection across Agents would interleave both.
 - **Not verified on Linux or Windows.** See [Requirements](#requirements).
@@ -401,6 +411,7 @@ npm install
 npm run typecheck     # strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes
 npm run build         # emits lib/
 npm test              # node --test, no build step
+npm run test:packed   # consume emitted JS through the actual package exports
 ```
 
 The connection and launcher suites talk to the **real** installed computer-use runtime and skip themselves

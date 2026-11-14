@@ -32,3 +32,5 @@ jobs:
         # The connection suite talks to a real computer-use runtime and skips itself when
         # none is installed, which is the case on CI.
         run: npm test
+      - name: Test packed public API
+        run: npm run test:packed

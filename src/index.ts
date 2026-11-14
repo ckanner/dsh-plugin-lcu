@@ -22,12 +22,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ComputerUseProviderName } from '@deepseek-ai/dsh-computer-use'
 
 import {
-  approvalValueForLabel, isPreApprovedApp, isPreApprovedOrigin, nativeAppApproval,
-  nativeAppApprovalResponse, normalizeApps, normalizeOrigins, originApprovalOrigin,
+  normalizeApps, normalizeOrigins,
 } from './approval.ts'
 import {
   LcuConnection, LcuError, TURN_CLEANUP_TIMEOUT_CODE, resolveElicitation,
-  type LcuElicitationRequest, type LcuElicitationResponse,
 } from './connection.ts'
 import { randomUUID } from 'node:crypto'
 
@@ -35,7 +33,8 @@ import { ManagedSession, type RuntimeConnection } from './session.ts'
 
 import { AppError, generationOf, planLaunch, resolveApp } from './app.ts'
 import { diag, describe } from './diag.ts'
-import { isAgentHostApp } from './host-guard.ts'
+import { presentLcuApproval } from './authority.ts'
+import { isManagedAgent } from './ownership.ts'
 import { ptcBridgeInstructions, registerCuaTool } from './ptc.ts'
 
 export const name = 'lcu'
@@ -122,9 +121,6 @@ interface Settings {
   readonly sectionOrder: number
 }
 
-/** The message shown for a browser-origin approval. */
-const ORIGIN_QUESTION = 'Allow computer use to access this site?'
-
 function resolveSettings(config: Config): Settings {
   return {
     appPath: config.app,
@@ -153,6 +149,11 @@ export function apply(ctx: Context, config: Config): void {
    */
   interface Attached {
     readonly connection: RuntimeConnection
+    readonly controller: AbortController
+    readonly calls: Set<Promise<unknown>>
+    readonly disposers: (() => void)[]
+    revoked: boolean
+    detaching?: Promise<void> | undefined
     /** Explicitly `| undefined` so the gate can be cleared under exactOptionalPropertyTypes. */
     pendingCleanup?: { readonly sessionId: string; readonly turnId: string } | undefined
     /** The turn number last seen from the step pipeline, for change detection only. */
@@ -166,6 +167,27 @@ export function apply(ctx: Context, config: Config): void {
     turnId?: string | undefined
   }
   const connections = new Map<Agent, Attached>()
+  const attachments = new Map<Agent, Promise<void>>()
+
+  /** Revoke tools first, then prove turn cleanup before admitting a replacement. */
+  async function detach(agent: Agent, state: Attached): Promise<void> {
+    if (state.detaching !== undefined) return state.detaching
+    state.revoked = true
+    state.controller.abort(new Error('the LCU preset was revoked'))
+    for (const dispose of state.disposers.splice(0)) dispose()
+    const operation = (async () => {
+      await Promise.allSettled([...state.calls])
+      let cleanupFailure: unknown
+      try {
+        if (state.turnId !== undefined) await state.connection.turnEnded(String(agent.id), state.turnId, 'Interrupt')
+      } catch (error) { cleanupFailure = error }
+      await state.connection.close()
+      if (cleanupFailure !== undefined) throw cleanupFailure
+      if (connections.get(agent) === state) connections.delete(agent)
+    })()
+    state.detaching = operation
+    try { await operation } catch (error) { state.detaching = undefined; throw error }
+  }
   diag(`apply: presets=${JSON.stringify(settings.presets)} chrome=${String(settings.chrome)} app=${describe(settings.appPath)}`
     + ` allowedApps=${JSON.stringify([...settings.allowedApps])} allowedOrigins=${JSON.stringify([...settings.allowedOrigins])}`)
 
@@ -202,91 +224,12 @@ export function apply(ctx: Context, config: Config): void {
    * The model cannot answer this: `userQuestions.ask` is the same surface the
    * `ask_user_question` tool uses, and only a person can reply to it.
    */
-  async function presentApproval(agent: Agent, request: LcuElicitationRequest, signal: AbortSignal): Promise<LcuElicitationResponse> {
-    const questions = ctx.get('userQuestions')
-    const approval0 = nativeAppApproval(request)
-    diag(`approval: asked kind=${approval0 === undefined ? (originApprovalOrigin(request) === undefined ? 'unknown' : 'browser-origin') : 'native-app'} userQuestions=${describe(questions)}`)
-    if (questions === undefined) {
-      diag('  approval: no userQuestions service -> cancel (fail closed)')
-      return { action: 'cancel' }
-    }
-
-    const approval = approval0
-    if (approval !== undefined) {
-      // Anti-self-approval first, and unconditionally: a configured allowlist
-      // must never be able to authorize the agent's own host.
-      if (await isAgentHostApp(approval.resource)) {
-        diag(`  approval: REFUSED agent-host app ${approval.resource}`)
-        ctx.logger.warn(`lcu: refusing to approve the app hosting this agent (${approval.resource})`)
-        return { action: 'decline' }
-      }
-      // The already-decided case, which is what an unattended run depends on.
-      if (isPreApprovedApp(approval, settings.allowedApps)) {
-        diag(`  approval: app ${approval.resource} pre-approved by allowedApps`)
-        return { action: 'accept', content: {} }
-      }
-      try {
-        const answer = await questions.ask({
-          agent,
-          signal,
-          questions: [{
-            id: 'choice',
-            header: 'Computer use approval',
-            question: approval.message,
-            detail: `Computer use will be able to see and control ${approval.resource}.`,
-            options: approval.choices.map((choice) => ({ label: choice.label })),
-          }],
-        })
-        // The answer carries the option LABEL; the response needs its VALUE.
-        const label = answer.answers.find((item) => item.id === 'choice')?.selected[0]
-        const value = approvalValueForLabel(approval, label)
-        diag(`  approval: user chose ${describe(label)} -> value ${describe(value)} for ${approval.resource}`)
-        return nativeAppApprovalResponse(request, value)
-      } catch (error: unknown) {
-        ctx.logger.debug(`lcu: native-app approval ended without a choice (${String(error)})`)
-        return { action: 'cancel' }
-      }
-    }
-
-    const origin = originApprovalOrigin(request)
-    if (origin !== undefined) {
-      // The plugin keeps no permission cache; an exact pre-approved origin is the only
-      // thing answered without asking. The log names every asked origin so a
-      // user can add the ones they keep approving to `allowedOrigins`.
-      const preApproved = isPreApprovedOrigin(request, settings.allowedOrigins)
-      diag(`  approval: site ${origin} ${preApproved ? 'pre-approved' : 'asking'} (add it to allowedOrigins to skip this)`)
-      if (preApproved) return { action: 'accept', content: {} }
-      try {
-        const answer = await questions.ask({
-          agent,
-          signal,
-          questions: [{
-            id: 'choice',
-            header: 'Computer use site approval',
-            question: ORIGIN_QUESTION,
-            detail: `The runtime asked to use ${origin}.`,
-            options: [{ label: 'Allow' }, { label: 'Decline' }],
-          }],
-        })
-        const selected = answer.answers.find((item) => item.id === 'choice')?.selected[0]
-        diag(`  approval: site ${origin} user chose ${describe(selected)}`)
-        if (selected === 'Allow') return { action: 'accept', content: {} }
-        return selected === 'Decline' ? { action: 'decline' } : { action: 'cancel' }
-      } catch (error: unknown) {
-        ctx.logger.debug(`lcu: site approval ended without a choice (${String(error)})`)
-        return { action: 'cancel' }
-      }
-    }
-
-    // Anything else is a shape this host does not understand; cancelling keeps
-    // the fail-closed contract rather than silently granting access.
-    ctx.logger.warn('lcu: unrecognized approval request was cancelled')
-    return { action: 'cancel' }
-  }
 
   /** Open and prepare one Agent's connection; never throws. */
-  async function attach(agent: Agent, signal?: AbortSignal): Promise<void> {
-    if (connections.has(agent)) return
+  async function attachOnce(agent: Agent, signal?: AbortSignal): Promise<void> {
+    const existing = connections.get(agent)
+    if (existing?.revoked) throw new Error('LCU was revoked with unconfirmed cleanup; inspect the previous runtime before reconnecting')
+    if (existing !== undefined || isManagedAgent(agent)) return
     // One plan per connection: the identity the runtime falls back to is per
     // connection, so two sessions never share one.
     let first: LcuConnection | undefined
@@ -304,7 +247,7 @@ export function apply(ctx: Context, config: Config): void {
         command: plan.command,
         args: plan.args,
         env: plan.env,
-        onElicitation: (request, elicitSignal) => presentApproval(agent, request, elicitSignal),
+        onElicitation: (request, elicitSignal) => presentLcuApproval(ctx, agent, settings, request, elicitSignal),
         onStderr: (line) => { ctx.logger.debug(`lcu: ${line}`) },
         // The control channel decides whether a per-application Stop is reachable
         // at all, and its decisions were invisible: `onDiag` existed on the
@@ -312,7 +255,8 @@ export function apply(ctx: Context, config: Config): void {
         // "no service is connected" said nothing anywhere.
         onDiag: (message) => { diag(`  ${message}`) },
       })
-      await opened.connect(signal)
+      try { await opened.connect(signal) }
+      catch (error) { await opened.close(); throw error }
       first ??= opened
       return opened
     }
@@ -359,22 +303,27 @@ export function apply(ctx: Context, config: Config): void {
     }
     const connection = session
     diag(`  attach: connected, server=${describe(first.serverInfo)} tools=${JSON.stringify(first.allTools.map((t) => t.name))} instructions=${String(first.instructions.length)}B`)
-    const state: Attached = { connection }
+    const state: Attached = { connection, controller: new AbortController(), calls: new Set(), disposers: [], revoked: false }
     // The runtime binds approvals and the per-app Stop to a real session and
     // turn, so the connection carries the session identity from the start.
     connection.sessionId = String(agent.id)
     connections.set(agent, state)
 
     // Everything below is agent-scoped: it unwinds when the Agent is disposed.
-    agent.ctx.effect(() => () => {
-      connections.delete(agent)
-      void connection.close()
-    })
+    agent.ctx.effect(() => () => detach(agent, state))
 
     try {
-      registerCuaTool(agent.ctx, connection, ctx, {
+      state.disposers.push(registerCuaTool(agent.ctx, connection, ctx, {
         currentTurn: () => state.turnId,
+        callSignal: () => state.controller.signal,
+        aroundCall: async (_request, _exec, operation) => {
+          if (state.revoked) throw new Error('the LCU preset was revoked')
+          const call = operation()
+          state.calls.add(call)
+          try { return await call } finally { state.calls.delete(call) }
+        },
         beforeCall: async () => {
+          if (state.revoked) throw new Error('the LCU preset was revoked')
           const pending = state.pendingCleanup
           if (pending === undefined) return
           // Retry the unfinished cleanup; only a settled one clears the gate.
@@ -382,7 +331,7 @@ export function apply(ctx: Context, config: Config): void {
           state.pendingCleanup = undefined
           diag('  cleanup gate: retry succeeded, calls unblocked')
         },
-      })
+      }))
       diag('  attach: tools registered')
     } catch (error: unknown) {
       diag(`  attach: TOOL REGISTRATION FAILED: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`)
@@ -392,13 +341,21 @@ export function apply(ctx: Context, config: Config): void {
     // The server's own pointer, plus what the server cannot know: the sandbox it
     // runs inside here. Without it a model asked to save a screenshot discovers
     // the boundary by probing, one failed call at a time.
-    agent.ctx.systemPrompt.section({
+    state.disposers.push(agent.ctx.systemPrompt.section({
       name: 'lcu-instructions',
       order: settings.sectionOrder,
       text: `${ptcBridgeInstructions(BRIDGE_URL)}\n\n${LCU_HOST_NOTE}`,
-    })
+    }))
 
     ctx.logger.info(`lcu: ${first.serverInfo.name ?? 'server'} attached for this session`)
+  }
+
+  async function attach(agent: Agent, signal?: AbortSignal): Promise<void> {
+    const existing = attachments.get(agent)
+    if (existing !== undefined) return existing
+    const pending = attachOnce(agent, signal)
+    attachments.set(agent, pending)
+    try { await pending } finally { attachments.delete(agent) }
   }
 
   /**
@@ -434,9 +391,14 @@ export function apply(ctx: Context, config: Config): void {
    */
   ctx.on('agent-preset/selected', async (sessionId, agentPreset) => {
     diag(`agent-preset/selected session=${String(sessionId)} preset=${describe(agentPreset)}`)
-    if (!settings.presets.includes(agentPreset)) return
     const agent = ctx.get('agents')?.get(String(sessionId))
     if (agent === undefined) { diag('  -> no live agent for that session'); return }
+    if (!settings.presets.includes(agentPreset)) {
+      await attachments.get(agent)
+      const attached = connections.get(agent)
+      if (attached !== undefined) await detach(agent, attached)
+      return
+    }
     try {
       await attach(agent)
       diag(`  -> attached=${String(connections.has(agent))}`)
@@ -466,7 +428,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('agent/pre-step', async ({ agent, turn }, next) => {
     const decision = await next()
     const state = connections.get(agent)
-    if (state !== undefined && state.turnNumber !== turn) {
+    if (state !== undefined && !state.revoked && state.turnNumber !== turn) {
       state.turnNumber = turn
       state.turnId = randomUUID()
     }
@@ -496,6 +458,7 @@ export function apply(ctx: Context, config: Config): void {
         diag('turn_ended: cleanup still running; LCU calls blocked until it settles')
         ctx.logger.warn('lcu: turn cleanup is still running; computer-use calls are blocked until it settles')
       } else {
+        state.pendingCleanup = { sessionId, turnId }
         diag(`turn_ended FAILED: ${error instanceof Error ? error.message : String(error)}`)
         ctx.logger.warn(`lcu: turn_ended failed (${error instanceof Error ? error.message : String(error)})`)
       }
@@ -503,10 +466,10 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   // Drain every connection if the plugin itself unloads.
-  ctx.effect(() => () => {
-    const live = [...connections.values()]
-    connections.clear()
-    for (const { connection } of live) void connection.close()
+  ctx.effect(() => async () => {
+    await Promise.allSettled([...attachments.values()])
+    const live = [...connections.entries()]
+    await Promise.all(live.map(([agent, state]) => detach(agent, state)))
   })
 }
 

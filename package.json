@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-lcu",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "PTC Computer/Browser CUA for DeepSeek Harness, backed by the runtime inside the ChatGPT desktop application.",
   "keywords": [
     "dsh-plugin",
@@ -34,7 +34,15 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./managed": {
+      "types": "./lib/types/managed.d.ts",
+      "default": "./lib/managed.js"
+    },
+    "./bridge": {
+      "types": "./lib/types/bridge.d.ts",
+      "default": "./lib/bridge.js"
+    }
   },
   "files": [
     "CHANGELOG.md",
@@ -43,10 +51,12 @@
     "cordis.patch.yml",
     "scripts",
     "dev-types",
-    "docs/README.zh.md"
+    "docs/README.zh.md",
+    "docs/MANAGED.md",
+    "docs/MANAGED.zh.md"
   ],
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.18.0 || >=24.0.0"
   },
   "publishConfig": {
     "access": "public"
@@ -60,14 +70,15 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"tests/*.spec.ts\"",
+    "test:packed": "node scripts/test-packed.mjs",
     "prepare": "npm run build",
     "probe": "node scripts/probe-lcu.mjs",
     "update-codex": "node scripts/update-codex.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=0.0.1-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-system-prompt": ">=0.0.1-rc.1 <0.3.0"
+    "@deepseek-ai/cordis": "~4.0.5 || ~4.1.0",
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.5 || ^0.2.2-0",
+    "@deepseek-ai/dsh-system-prompt": "^0.2.1-rc.5 || ^0.2.2-0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

@@ -3,18 +3,18 @@
  *
  * The ChatGPT application's CUA runtime is a JavaScript REPL (`js`). PTC
  * programs cannot call that REPL's `cua` object directly, so this module exposes
- * one ordinary tool, `cua`, whose binding is a small RPC: a program calls a
+ * one namespaced structured RPC tool, `lcu_cua`, whose binding is a small RPC: a program calls a
  * method, the host runs it inside the persistent CUA REPL, and app/tab/window
  * objects come back as opaque handles.
  *
- * The model never sees the `js` tool. It sees the generated SDK's `tools.cua`
+ * The model never sees the `js` tool. It sees the generated SDK's `tools.lcu_cua`
  * binding and the `connectCua` prelude in {@link ptcBridgeInstructions}.
  *
  * @module dsh-plugin-lcu/ptc
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -24,7 +24,7 @@ import type { RuntimeConnection } from './session.ts'
 import { extractText, prepareProjection } from './tool.ts'
 
 /** The single model-facing tool of the PTC surface. */
-export const CUA_TOOL_NAME = 'cua'
+export const CUA_TOOL_NAME = 'lcu_cua'
 
 /** Marker printed by the in-REPL bridge so the host can find structured output. */
 export const CUA_RESULT_MARKER = '__DSH_LCU_RESULT__'
@@ -129,6 +129,48 @@ export interface CuaToolOptions {
   readonly beforeCall?: () => Promise<void>
   /** The Agent's active turn identity, used for runtime approvals and cleanup. */
   readonly currentTurn?: () => string | undefined
+  /** The trusted owner may stop an entire turn, independently of the current model call. */
+  readonly callSignal?: () => AbortSignal
+  /** Host admission surrounds the complete RPC, including its two native calls. */
+  readonly aroundCall?: (request: CuaRequest, exec: ToolRunContext, operation: () => Promise<unknown>) => Promise<unknown>
+  /** Prepared projection is not proof that downstream policy or the model received it. */
+  readonly onMedia?: (observation: CuaMediaObservation, exec: ToolRunContext) => Promise<void>
+}
+
+export interface CuaMediaObservation {
+  readonly method: string
+  readonly target?: string
+  readonly observedAt: string
+  readonly modelRoute: { readonly provider?: string; readonly model?: string }
+  readonly capturedImages: number
+  readonly preparedImages: number
+  readonly imageDeliveredToModel: 'unverified'
+  readonly images: readonly {
+    readonly sha256: string
+    readonly mimeType: string
+    readonly bytes: number
+    readonly attachment?: unknown
+    readonly hostPath?: string
+  }[]
+}
+
+/** Bind opaque native handles to the exact connection generation. */
+export function scopeCuaValue(value: unknown, epoch?: string): unknown {
+  if (epoch === undefined) return value
+  if (Array.isArray(value)) return value.map(child => scopeCuaValue(child, epoch))
+  if (!isRecord(value)) return value
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key,
+    key === '__handle' && typeof child === 'string' ? `${epoch}:${child}` : scopeCuaValue(child, epoch),
+  ]))
+}
+
+function nativeRequest(request: CuaRequest, epoch?: string): CuaRequest {
+  if (epoch === undefined || request.target === undefined) return request
+  const prefix = `${epoch}:`
+  if (!request.target.startsWith(prefix) || request.target.length === prefix.length) {
+    throw new Error('LCU_STALE_HANDLE: acquire a fresh app or tab in the current runtime epoch')
+  }
+  return { ...request, target: request.target.slice(prefix.length) }
 }
 
 /** One validated bridge request. */
@@ -184,11 +226,15 @@ async function invokeCua(
   exec: ToolRunContext,
 ): Promise<{ readonly value: unknown; readonly content: readonly unknown[] }> {
   const turn = options.currentTurn?.()
+  const callSignal = options.callSignal?.()
+  const signal = callSignal === undefined ? exec.signal : AbortSignal.any([exec.signal, callSignal])
   const token = `r-${randomUUID()}`
+  const epoch = connection.epoch
   const subCall = (suffix: string) => ({
-    signal: exec.signal,
+    signal,
     ...(turn === undefined ? {} : { turnId: turn }),
     ...(exec.callId === undefined || exec.callId === '' ? {} : { callId: `${exec.callId}:cua:${suffix}` }),
+    ...(epoch === undefined ? {} : { expectedEpoch: epoch }),
   })
   const firstCode = [
     CUA_PRELUDE,
@@ -340,13 +386,20 @@ export function createCuaTool(
       },
     },
     async execute(args: unknown, exec: ToolRunContext): Promise<unknown> {
+      const outerRequest = readCuaRequest(args)
+      const operation = async (): Promise<unknown> => {
       await options.beforeCall?.()
-      const request = readCuaRequest(args)
+      await connection.prepare?.()
+      const epoch = connection.epoch
+      const request = nativeRequest(outerRequest, epoch)
+      const ownerSignal = options.callSignal?.()
+      const signal = ownerSignal === undefined ? exec.signal : AbortSignal.any([exec.signal, ownerSignal])
+      if (signal.aborted) throw new Error('LCU operation was canceled before dispatch')
       if (request.method === 'stopApp') return stopApp(connection, options, request.args)
       if (request.method === 'documentation') {
         const turn = options.currentTurn?.()
         const result = await connection.callTool('js', { code: 'await cua.rewriteDocumentation()' }, {
-          signal: exec.signal,
+          signal,
           ...(turn === undefined ? {} : { turnId: turn }),
           ...(exec.callId === undefined || exec.callId === '' ? {} : { callId: exec.callId }),
         })
@@ -357,19 +410,45 @@ export function createCuaTool(
       if (request.method === 'reset') {
         const turn = options.currentTurn?.()
         const result = await connection.callTool('js_reset', {}, {
-          signal: exec.signal,
+          signal,
           ...(turn === undefined ? {} : { turnId: turn }),
           ...(exec.callId === undefined || exec.callId === '' ? {} : { callId: exec.callId }),
         })
         if (result.isError) throw new LcuError('tools/call', extractText(result.content, 'js_reset'))
-        return { reset: true }
+        connection.rotateEpoch?.()
+        return { reset: true, ...(connection.epoch === undefined ? {} : { runtimeEpoch: connection.epoch }) }
       }
       const result = await invokeCua(connection, request, options, exec)
+      const value = scopeCuaValue(result.value, epoch)
       if (result.content.some((block) => isRecord(block) && block.type === 'image')) {
-        const content = await prepareProjection(ctx, exec, result.content as LcuContentBlock[], 'cua')
-        projections.set(exec, { value: result.value, content })
+        const content = await prepareProjection(ctx, { ...exec, signal }, result.content as LcuContentBlock[], CUA_TOOL_NAME)
+        projections.set(exec, { value, content })
+        const images = result.content.flatMap((block, sourceIndex) =>
+          isRecord(block) && block.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string'
+            ? [{ data: block.data, mimeType: block.mimeType, sourceIndex }] : [])
+        const projected = content.filter(block => block.type === 'image')
+        const routed = exec.agent?.session.requestHeader()?.config
+        const provider = routed?.provider ?? exec.agent?.options.provider
+        const model = routed?.model ?? exec.agent?.options.model
+        await options.onMedia?.({
+          method: outerRequest.method,
+          ...(outerRequest.target === undefined ? {} : { target: outerRequest.target }),
+          observedAt: new Date().toISOString(),
+          modelRoute: { ...(provider === undefined ? {} : { provider }), ...(model === undefined ? {} : { model }) },
+          capturedImages: images.length, preparedImages: projected.length, imageDeliveredToModel: 'unverified',
+          images: images.map((block) => {
+            const bytes = Buffer.from(block.data, 'base64')
+            const attachment = (content[block.sourceIndex] as { attachment?: unknown } | undefined)?.attachment
+            let hostPath: string | undefined
+            try { if (attachment !== undefined) hostPath = ctx.get('attachments')?.imageHostPath(attachment as never) } catch { /* store has no host path */ }
+            return { sha256: createHash('sha256').update(bytes).digest('hex'), mimeType: block.mimeType, bytes: bytes.length,
+              ...(attachment === undefined ? {} : { attachment }), ...(hostPath === undefined ? {} : { hostPath }) }
+          }),
+        }, exec)
       }
-      return result.value
+      return value
+      }
+      return options.aroundCall === undefined ? operation() : options.aroundCall(outerRequest, exec, operation)
     },
     projectContent(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) {
       const projection = projections.get(exec)
@@ -403,7 +482,7 @@ export function registerCuaTool(
 /**
  * Model-facing PTC instructions.
  *
- * The generated SDK already declares `tools.cua`; this section teaches the model
+ * The generated SDK already declares `tools.lcu_cua`; this section teaches the model
  * how to turn it into the same `cua` object the native REPL used to expose.
  *
  * @param bridgeUrl - absolute `file:` URL of the compiled `bridge.js`.
@@ -415,7 +494,7 @@ export function ptcBridgeInstructions(bridgeUrl: string): string {
     'Initialize it once, before the first CUA call:',
     '```ts',
     `var { connectCua } = await import(${JSON.stringify(bridgeUrl)});`,
-    'var cua = connectCua((request) => tools.cua(request), text => console.log(text));',
+    'var cua = connectCua((request) => tools.lcu_cua(request), text => console.log(text));',
     '```',
     'Then use the runtime API directly:',
     '```ts',
@@ -424,13 +503,15 @@ export function ptcBridgeInstructions(bridgeUrl: string): string {
     "const tab = await cua.getTab({ url: 'https://example.com' }, { browser: 'chrome' });",
     '```',
     '`cua.getApp`, `cua.getBrowser`, `cua.getTab` and `cua.createBrowserTab` return handles. '
-      + 'Call methods on those handles directly; every call is routed through `tools.cua`. '
+      + 'Call methods on those handles directly; every call is routed through `tools.lcu_cua`. '
       + '`cua.stopApp(app?)` lists or releases held applications, `cua.documentation()` returns the '
       + 'runtime API manual, and `cua.reset()` clears the runtime.',
     'Call `cua.documentation()` once to load the runtime API manual, and `cua.getState()` when the '
       + 'available applications, browsers or tabs are unknown. '
       + 'Screenshots are delivered through the harness attachment pipeline; browser access still '
       + 'requires the configured Chrome surface and site approvals.',
+    'Show selected text with inspect(...) when the runtime declares it, otherwise console.log(...).',
+    'The lcu_cua binding preserves structured handles and projects images separately; do not substitute a native cua binding.',
     'Do not call `js` or `js_reset`: those native tools are not part of the PTC surface.',
   ].join('\n')
 }

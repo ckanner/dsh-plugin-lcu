@@ -16,6 +16,7 @@
  * @module dsh-plugin-lcu/session
  */
 
+import { randomUUID } from 'node:crypto'
 import type { LcuConnection } from './connection.ts'
 
 /**
@@ -26,6 +27,9 @@ import type { LcuConnection } from './connection.ts'
  */
 export interface RuntimeConnection {
   sessionId: string | undefined
+  readonly epoch?: string
+  prepare?(): Promise<void>
+  rotateEpoch?(): void
   modelTools: LcuConnection['modelTools']
   readonly hasHostControl: boolean
   callTool: LcuConnection['callTool']
@@ -37,6 +41,9 @@ export interface RuntimeConnection {
 
 /** How the session opens a connection, and how it notices the application moved. */
 export interface ManagedSessionOptions {
+  /** Managed invocations pin their admitted runtime; a change requires a new admission. */
+  generationPolicy?: 'replace' | 'pin'
+
   /**
    * Open a fresh connection.
    *
@@ -79,6 +86,8 @@ export class ManagedSession implements RuntimeConnection {
    */
   #sessionId: string | undefined
   #closed = false
+  #epoch = randomUUID()
+  #closing: Promise<void> | undefined
   #rebuilding: Promise<void> | undefined
   readonly #options: ManagedSessionOptions
 
@@ -95,18 +104,40 @@ export class ManagedSession implements RuntimeConnection {
    * @returns the session, already connected.
    */
   static async open(options: ManagedSessionOptions): Promise<ManagedSession> {
+    // Sample before spawning as well as after the handshake. Sampling only
+    // afterwards can label a runtime started from the old application as the
+    // new generation when the application updates during initialize.
+    let before = ''
+    try { before = options.generation() }
+    catch (error: unknown) {
+      options.onGenerationUnreadable?.(error)
+      if (options.generationPolicy === 'pin') throw error
+    }
     const connection = await options.connect('initial')
-    // Recorded after connecting, not before: an update during the handshake is
-    // then caught by the first call rather than missed.
     let generation: string
     try {
       generation = options.generation()
     } catch (error: unknown) {
       options.onGenerationUnreadable?.(error)
+      if (options.generationPolicy === 'pin') { await connection.close(); throw error }
       generation = ''
     }
-    return new ManagedSession(connection, generation, options)
+    if (options.generationPolicy === 'pin' && generation !== before) {
+      await connection.close()
+      throw new Error('LCU_GENERATION_CHANGED: application changed during runtime initialization')
+    }
+    // A replaceable desktop session checks again before its first operation.
+    // Keep the pre-spawn identity if initialization straddled an update.
+    return new ManagedSession(connection, before, options)
   }
+
+  get epoch(): string { return this.#epoch }
+
+  /** Invalidate live proxies after a successful explicit runtime reset. */
+  rotateEpoch(): void { this.#epoch = randomUUID() }
+
+  /** Resolve the actual generation before interpreting a handle. */
+  async prepare(): Promise<void> { await this.#ensureCurrent() }
 
   get sessionId(): string | undefined {
     return this.#connection.sessionId ?? this.#sessionId
@@ -134,9 +165,11 @@ export class ManagedSession implements RuntimeConnection {
     } catch (error: unknown) {
       // Reported, then ignored: see `onGenerationUnreadable`.
       this.#options.onGenerationUnreadable?.(error)
+      if (this.#options.generationPolicy === 'pin') throw new Error('LCU_GENERATION_UNKNOWN: runtime identity cannot be verified', { cause: error })
       return
     }
     if (current === this.#generation) return
+    if (this.#options.generationPolicy === 'pin') throw new Error('LCU_GENERATION_CHANGED: close this invocation before admitting a replacement')
     // One replacement at a time: concurrent calls must not each open a runtime.
     if (this.#rebuilding === undefined) {
       this.#rebuilding = this.#rebuild(current).finally(() => { this.#rebuilding = undefined })
@@ -156,21 +189,29 @@ export class ManagedSession implements RuntimeConnection {
       this.#options.onRegenerateFailed?.(error)
       return
     }
+    if (this.#closed) {
+      await next.close()
+      throw new Error('the session was closed during runtime replacement')
+    }
     // The identity travels with the session, not with the connection.
     next.sessionId = this.#sessionId
     this.#connection = next
     this.#generation = current
+    this.rotateEpoch()
     this.#options.onRegenerated?.({ from, to: current })
     await previous.close()
   }
 
   async callTool(...args: Parameters<LcuConnection['callTool']>): ReturnType<LcuConnection['callTool']> {
     await this.#ensureCurrent()
+    const expected = args[2]?.expectedEpoch
+    if (expected !== undefined && expected !== this.#epoch) throw new Error('LCU_STALE_HANDLE: runtime changed during the operation')
     return await this.#connection.callTool(...args)
   }
 
   async turnEnded(...args: Parameters<LcuConnection['turnEnded']>): ReturnType<LcuConnection['turnEnded']> {
-    await this.#ensureCurrent()
+    // Cleanup belongs to the runtime that executed the turn. Rebuilding here
+    // would acknowledge a fresh runtime while abandoning the original owner.
     return await this.#connection.turnEnded(...args)
   }
 
@@ -186,8 +227,10 @@ export class ManagedSession implements RuntimeConnection {
 
   /** Retire the connection. Later calls fail rather than opening a new runtime. */
   async close(): Promise<void> {
-    if (this.#closed) return
+    if (this.#closing !== undefined) return this.#closing
     this.#closed = true
-    await this.#connection.close()
+    const pending = this.#connection.close()
+    this.#closing = pending
+    try { await pending } catch (error) { this.#closing = undefined; throw error }
   }
 }

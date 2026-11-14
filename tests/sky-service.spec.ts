@@ -40,7 +40,7 @@ interface Harness {
 }
 
 /** Build the runtime the wrapper believes it is running inside. */
-function harness(options: { readonly cleanupFails?: boolean } = {}): Harness {
+function harness(options: { readonly cleanupFails?: boolean; readonly cleanupFailures?: number } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-sky-'))
   const forwarded: unknown[] = []
   const cleanups: Harness['cleanups'] = []
@@ -52,10 +52,12 @@ function harness(options: { readonly cleanupFails?: boolean } = {}): Harness {
   }\n`)
 
   const client = join(dir, 'client.mjs')
-  writeFileSync(client, `export class MacComputerUseClient {
+  writeFileSync(client, `let attempts = 0;
+  export class MacComputerUseClient {
     async request(method, args, opts) {
       globalThis.__dshCleanups.push({ method, args, options: opts })
-      ${options.cleanupFails === true ? "throw new Error('the application refused the cleanup')" : 'return { ok: true }'}
+      if (${options.cleanupFails === true ? 'true' : `++attempts <= ${options.cleanupFailures ?? 0}`}) throw new Error('the application refused the cleanup')
+      return { ok: true }
     }
   }\n`)
 
@@ -137,23 +139,37 @@ test('a malformed identity is ignored rather than fatal', async () => {
   assert.equal(h.forwarded.length, 7)
 })
 
-test('a failing cleanup is retried and then given up on', async () => {
+test('a failing cleanup is retried and remains unknown after the retry budget is exhausted', async () => {
   const h = harness({ cleanupFails: true })
   const wrapper = await loadWrapper()
   h.setIdentity(identity('session-b', 'turn-b'))
   await wrapper.handleRpc({ method: 'get_app_state' })
-  // The hook itself must not throw: the runtime fails the turn when it does, and
-  // a cleanup that cannot settle would then break every turn.
-  await h.hooks[0]?.run({ session_id: 'session-b', turn_id: 'turn-b' })
+  await assert.rejects(() => h.hooks[0]!.run({ session_id: 'session-b', turn_id: 'turn-b' }), /LCU_CLEANUP_UNKNOWN/)
   assert.equal(h.cleanups.length, 1, 'the first attempt happens at turn end')
   // Later requests retry, which is what keeps a slow application from losing it.
-  await wrapper.handleRpc({ method: 'get_app_state' })
-  await wrapper.handleRpc({ method: 'get_app_state' })
+  await assert.rejects(() => wrapper.handleRpc({ method: 'get_app_state' }), /LCU_CLEANUP_UNKNOWN/)
+  await assert.rejects(() => wrapper.handleRpc({ method: 'get_app_state' }), /LCU_CLEANUP_UNKNOWN/)
   assert.equal(h.cleanups.length, 3, 'a failure is retried before the next request')
-  // And then it stops, so a permanent failure cannot wedge the session forever.
-  await wrapper.handleRpc({ method: 'get_app_state' })
-  await wrapper.handleRpc({ method: 'get_app_state' })
+  // A bounded retry budget cannot erase an unacknowledged desktop owner.
+  await assert.rejects(() => wrapper.handleRpc({ method: 'get_app_state' }), /LCU_CLEANUP_UNKNOWN/)
+  await assert.rejects(() => h.hooks[0]!.run({ session_id: 'session-b', turn_id: 'turn-b' }), /LCU_CLEANUP_UNKNOWN/)
   assert.equal(h.cleanups.length, 3, 'retries are bounded')
+  assert.equal(h.forwarded.length, 1, 'no later action is forwarded while cleanup is unknown')
+})
+
+test('a repeated hook retries the original identity and succeeds only after application acknowledgement', async () => {
+  const h = harness({ cleanupFailures: 1 })
+  const wrapper = await loadWrapper()
+  h.setIdentity(identity('session-retry', 'turn-retry'))
+  await wrapper.handleRpc({ method: 'get_app_state' })
+  const event = { session_id: 'session-retry', turn_id: 'turn-retry' }
+  await assert.rejects(() => h.hooks[0]!.run(event), /LCU_CLEANUP_UNKNOWN/)
+  await h.hooks[0]!.run(event)
+  assert.equal(h.cleanups.length, 2)
+  assert.deepEqual(h.cleanups[0]?.args, h.cleanups[1]?.args)
+  h.setIdentity(identity('session-retry', 'next-turn'))
+  await wrapper.handleRpc({ method: 'get_app_state' })
+  assert.equal(h.forwarded.length, 2)
 })
 
 test('the hook reports an unusable identity instead of failing the turn', async () => {
