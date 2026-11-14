@@ -62,11 +62,14 @@ export function connectCua(call: CuaBridgeCall, log?: (text: string) => void): C
     return decode(result)
   }
 
-  const makeHandle = (id: string): CuaBridgeObject => new Proxy({} as CuaBridgeObject, {
-    get(_target, property) {
+  const makeHandle = (id: string, properties: Record<string, unknown> = {}): CuaBridgeObject => new Proxy(properties as CuaBridgeObject, {
+    get(target, property) {
       // A Proxy is otherwise awaitable if it exposes `then`; a handle must not
       // be mistaken for a promise by `await cua.getApp(...)`.
       if (property === 'then') return undefined
+      if (typeof property === 'string' && Object.hasOwn(target, property)) {
+        return target[property]
+      }
       if (typeof property !== 'string' || !METHOD_NAME.test(property) || RESERVED_METHODS.has(property)) {
         return undefined
       }
@@ -76,7 +79,12 @@ export function connectCua(call: CuaBridgeCall, log?: (text: string) => void): C
 
   const decode = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(decode)
-    if (isRecord(value) && typeof value.__handle === 'string') return makeHandle(value.__handle)
+    if (isRecord(value) && typeof value.__handle === 'string') {
+      const { __handle, ...properties } = value
+      const decoded: Record<string, unknown> = {}
+      for (const [key, child] of Object.entries(properties)) decoded[key] = decode(child)
+      return makeHandle(__handle, decoded)
+    }
     if (isRecord(value)) {
       const out: Record<string, unknown> = {}
       for (const [key, child] of Object.entries(value)) out[key] = decode(child)

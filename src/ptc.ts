@@ -79,7 +79,26 @@ globalThis.__dshLcu ??= (() => {
     if (value instanceof Date) return value.toISOString()
     if (seen.has(value)) return '[circular]'
     seen.add(value)
-    if (hasMethods(value)) return remember(value)
+    if (hasMethods(value)) {
+      const handle = remember(value)
+      const names = new Set()
+      let current = value
+      while (current !== null && current !== Object.prototype) {
+        for (const key of Object.getOwnPropertyNames(current)) {
+          if (key === 'constructor' || key === '__handle' || names.has(key)) continue
+          names.add(key)
+          try {
+            const child = value[key]
+            if (typeof child !== 'function') handle[key] = encode(child, seen)
+          } catch {
+            // A native getter may require a connection or permissions; it is
+            // not a reason to turn the whole object into an opaque handle.
+          }
+        }
+        current = Object.getPrototypeOf(current)
+      }
+      return handle
+    }
     const keys = Object.keys(value)
     const out = {}
     for (const key of keys) out[key] = encode(value[key], seen)

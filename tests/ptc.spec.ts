@@ -58,7 +58,7 @@ test('nested handle objects are decoded, not left as raw __handle values', async
   const cua = connectCua(async (request) => {
     calls.push(request)
     if (request.method === 'getState') {
-      return { apps: [], browsers: [{ metadata: { __handle: 'b1' }, tabs: [{ __handle: 't1' }] }] }
+      return { apps: [], browsers: [{ metadata: { __handle: 'b1', browserId: '1' }, tabs: [{ __handle: 't1', id: 'tab-1', title: 'Example' }] }] }
     }
     if (request.target === 't1' && request.method === 'getTitle') return 'Example'
     return null
@@ -66,6 +66,9 @@ test('nested handle objects are decoded, not left as raw __handle values', async
 
   const state = await cua.getState()
   const tab = state.browsers[0].tabs[0]
+  assert.equal(tab.id, 'tab-1')
+  assert.equal(tab.title, 'Example')
+  assert.equal(state.browsers[0].metadata.browserId, '1')
   assert.equal(typeof tab.getTitle, 'function')
   assert.equal(await tab.getTitle(), 'Example')
 })
