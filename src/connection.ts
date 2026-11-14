@@ -10,8 +10,8 @@
  *
  * Contract taken from the runtime:
  * - declare `capabilities.elicitation` and answer `elicitation/create`
- * - expose only `js` and `js_reset` to the model; `turn_ended` and
- *   `js_add_node_module_dir` are host-only
+ * - `js` and `js_reset` remain the host transport; the PTC surface wraps them
+ *   and never exposes them to the model
  * - inject the server's `initialize.instructions` into model context
  * - fail closed: an elicitation with no handler, or any unknown shape, cancels
  * - approvals never time out; a pending approval freezes the call deadline
@@ -372,7 +372,7 @@ export class LcuConnection {
   }
 
   /**
-   * Call one tool. `js_reset` and `js` are the model-facing ones; the host-only
+   * Call one tool. `js` and `js_reset` back the PTC bridge; the host-only
    * tools are reachable here too because the lifecycle needs `turn_ended`.
    *
    * Requests carry no client-side deadline by default: a pause for a human

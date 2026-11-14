@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+PTC Computer Use.
+
+**The model interface is now `cua`, not `js`.** PTC programs get a
+`connectCua` prelude and call `tools.cua` underneath. App, browser and tab
+objects come back as opaque handles, so `cua.getApp`, `cua.getTab`,
+`cua.createBrowserTab` and handle methods all run in one `run_code` program.
+`cua.stopApp(app?)` replaces the old `computer_use_stop` tool, and
+`cua.documentation()` returns the runtime API manual.
+
+**Both generated presets use PTC.** `heavy` no longer swaps in
+`tool-executor-native`; the generator emits `tool-executor-ptc` for both
+`daily` and `heavy`, and the profile's LCU allowlist covers both.
+
+The underlying ChatGPT runtime, Chrome surface, approvals, `allowedOrigins`,
+turn cleanup and image attachment pipeline are unchanged.
+
+
 ## 0.3.8
 
 The Codex upgrade script works across DSH Desktop releases again, and its

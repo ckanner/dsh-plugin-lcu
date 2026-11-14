@@ -36,7 +36,7 @@ import { ManagedSession, type RuntimeConnection } from './session.ts'
 import { AppError, generationOf, planLaunch, resolveApp } from './app.ts'
 import { diag, describe } from './diag.ts'
 import { isAgentHostApp } from './host-guard.ts'
-import { registerLcuTools } from './tool.ts'
+import { ptcBridgeInstructions, registerCuaTool } from './ptc.ts'
 
 export const name = 'lcu'
 export const inject = ['tools', 'systemPrompt']
@@ -52,14 +52,18 @@ export const inject = ['tools', 'systemPrompt']
  */
 const LCU_HOST_NOTE = [
   'Host notes for this environment:',
-  '- `js` runs in a sandbox that cannot write files anywhere (writes fail with EPERM, including in the',
+  '- The Computer Use runtime is reached through the PTC `cua` object; there is no model-facing `js` tool.',
+  '- The runtime JavaScript sandbox cannot write files (writes fail with EPERM, including in the',
   '  temporary directory). Do not try to save with `fs`; it will not work.',
   '- Screenshots are delivered to the harness as images, and every stored image reports its host',
   '  filesystem path in the tool result. To put a copy in the workspace use bash, setting the mode as',
   "  you copy: `install -m 644 '<path>' <target>`. A plain `cp` leaves the mode 400 object unreadable.",
-  '- Anything the sandbox cannot do — writing files, reading the host filesystem — is available through',
+  '- Anything the runtime cannot do — writing files, reading the host filesystem — is available through',
   '  the `bash` tool instead.',
 ].join('\n')
+
+/** Absolute URL of the compiled PTC bridge, embedded in the generated SDK guidance. */
+const BRIDGE_URL = new URL('./bridge.js', import.meta.url).href
 
 /** The section order of the injected instructions, after the tool guidance. */
 const DEFAULT_SECTION_ORDER = 0
@@ -88,8 +92,8 @@ export interface Config {
    * Agent preset ids whose sessions get the tools.
    *
    * Presets are independent compositions, so this is an explicit list rather
-   * than a capability the preset itself declares; `heavy` is the preset the
-   * generator script builds for this plugin.
+   * than a capability the preset itself declares; the generator builds `daily`
+   * and `heavy`, and both now use PTC.
    */
   presets?: string[]
   /** Exact HTTP(S) origins pre-approved for browser access, never widened. */
@@ -127,7 +131,7 @@ function resolveSettings(config: Config): Settings {
     command: config.command,
     chrome: config.chrome === true,
     audio: config.audio === true,
-    presets: config.presets ?? ['heavy'],
+    presets: config.presets ?? ['daily', 'heavy'],
     allowedOrigins: normalizeOrigins(config.allowedOrigins ?? []),
     allowedApps: normalizeApps(config.allowedApps),
     sectionOrder: config.sectionOrder ?? DEFAULT_SECTION_ORDER,
@@ -368,7 +372,7 @@ export function apply(ctx: Context, config: Config): void {
     })
 
     try {
-      registerLcuTools(agent.ctx, connection, ctx, {
+      registerCuaTool(agent.ctx, connection, ctx, {
         currentTurn: () => state.turnId,
         beforeCall: async () => {
           const pending = state.pendingCleanup
@@ -391,9 +395,7 @@ export function apply(ctx: Context, config: Config): void {
     agent.ctx.systemPrompt.section({
       name: 'lcu-instructions',
       order: settings.sectionOrder,
-      text: first.instructions === ''
-        ? LCU_HOST_NOTE
-        : `${first.instructions}\n\n${LCU_HOST_NOTE}`,
+      text: `${ptcBridgeInstructions(BRIDGE_URL)}\n\n${LCU_HOST_NOTE}`,
     })
 
     ctx.logger.info(`lcu: ${first.serverInfo.name ?? 'server'} attached for this session`)

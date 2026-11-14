@@ -17,6 +17,7 @@
       name: 'dsh-plugin-lcu'
       config:
         presets:
+          - daily
           - heavy
         chrome: true
         # Approvals are a person's, and an unanswered question is a refusal, so an

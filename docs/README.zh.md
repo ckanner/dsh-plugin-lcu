@@ -28,16 +28,18 @@
 
 | 工具 | 作用 |
 |---|---|
-| `js` | 对 `cua` 桌面/浏览器 API 运行一段 JavaScript。第一次调用会返回 API 文档；选中应用或标签页会返回初始 UI 状态。 |
-| `js_reset` | 丢弃持久的 JavaScript 会话，重新起一个运行时。 |
+| `cua` | 到桌面/浏览器运行时的 PTC bridge。`cua.getState`、`cua.getApp`、`cua.getBrowser`、`cua.getTab` 和 `cua.createBrowserTab` 返回值或 handle；handle 上的截图、点击、输入、AX 读取都走同一个 binding。 |
 
-另外两个**只给宿主、永不暴露给模型**的工具：`turn_ended`（逐轮清理）和 `js_add_node_module_dir`。
+插件不再暴露 native `js` 工具。PTC 程序用 `connectCua` 初始化，然后按原来的对象 API 使用：
 
-插件自己只加了一个工具：
+```ts
+var { connectCua } = await import('<profile>/node_modules/dsh-plugin-lcu/lib/bridge.js')
+var cua = connectCua((request) => tools.cua(request), text => console.log(text))
+const state = await cua.getState()
+const app = await cua.getApp('Finder')
+```
 
-| 工具 | 作用 |
-|---|---|
-| `computer_use_stop` | 不带参数时列出运行时当前为本次会话持有的应用；带 `app`（其中一个 bundle id）时释放它。它清除宿主应用对**某一个**应用的"正在使用你的电脑"状态，而不结束会话。 |
+`cua.stopApp(app?)` 列出或释放持有的应用；`cua.documentation()` 返回运行时 API 手册；`cua.reset()` 清除运行时。原来的宿主专用 `turn_ended` / `js_add_node_module_dir` 仍是内部工具，不展示给模型。
 
 截图通过 DSH 的附件存储以持久图片返回，所以声明了图像输入的模型路由**真的能看见屏幕**。
 
@@ -79,11 +81,11 @@ node dsh-preset-generator/src/gen-presets.mjs --profile ~/.dsh/profiles/<profile
 | preset | 基底 | 增加 |
 |---|---|---|
 | `daily` | 自带的 `ptc` preset | 一套自己的 Codex 委派 provider |
-| `heavy` | 同上，且 `tool-presentation: native` | 以上全部，且本插件接入 |
+| `heavy` | 同上，且 `tool-executor-ptc` | 以上全部，且接入 PTC `cua` Computer/Browser bridge |
 
 DSH 升级后重跑一次，让副本跟上。`--daily-only` 只生成 `daily`；`--dry-run` 只打印不写；`--out FILE` 写到别处。官方的 Codex 工具不再是 per-preset 行：从 DSH 0.2.1 起官方 bundle 提供的是**全局** `subagent_codex`，独立 provider 在这些生成的 preset 里按 Agent 注册同名工具，遮蔽全局那个。同一个 scope 内的两次注册仍会冲突，所以不能在这个 provider 之外再启用同名的 `tool-subagent` 行。
 
-> `heavy` 特意把工具呈现设为 `native`。DSH 0.2.1 移除了旧的 `both` 模式 —— 一个 preset 只能声明一种呈现，`native` 或 `ptc` —— 而纯 `ptc` 呈现下模型只看得到 `run_code`，`js` 就得嵌成另一个 JavaScript 程序里的字符串。`native` 让 `js` 可以被直接调用，代价是该 preset 放弃 PTC。
+> 两个 preset 都使用 PTC。插件的 PTC bridge 把运行时的 `cua` 对象变成 `tools.cua` binding，模型写一个 `run_code` 程序即可，不需要把 `js` 字符串嵌进另一个 JavaScript 程序。
 
 ### 3. 配置哪些模式能用
 
@@ -94,14 +96,15 @@ DSH 升级后重跑一次，让副本跟上。`--daily-only` 只生成 `daily`�
   name: 'dsh-plugin-lcu'
   config:
     presets:
+      - daily
       - heavy
 ```
 
 ### 4. 重启，然后做一次调用
 
-重启 harness —— 插件**代码和配置都不热更新**。然后在 `heavy` 模式（显示为**重活**）里起一个任务，让它做点无害的事：
+重启 harness —— 插件**代码和配置都不热更新**。然后在任意一个已生成的模式里起一个任务，让它做点无害的事：
 
-> 用 `js` 工具运行 `await cua.getState();`，告诉我哪些应用在跑。
+> 用 PTC `cua` bridge 运行 `await cua.getState();`，告诉我哪些应用在跑。
 
 第一次触碰某个应用时，运行时会请求批准。见下文。
 
@@ -157,7 +160,7 @@ config:
 | `command` | 未设 | 用一个显式可执行文件替换计算出的启动方式，用于内置解析够不到的应用。它会跳过运行时自己的环境设置。 |
 | `chrome` | `false` | 打开浏览器面。 |
 | `audio` | `false` | 打开运行时的 computer-audio API。 |
-| `presets` | `["heavy"]` | 允许使用这些工具的 Agent preset id。 |
+| `presets` | `["daily", "heavy"]` | 允许使用 PTC bridge 的 Agent preset id。 |
 | `allowedOrigins` | `[]` | 免问的精确 HTTP(S) origin。非法条目会被丢弃，绝不放宽。 |
 | `allowedApps` | `[]` | 免批准的 bundle identifier。**承载 agent 的应用即使被列进去也会被拒**。 |
 | `sectionOrder` | `0` | 注入的运行时指令在 prompt 中的排序。 |
@@ -242,7 +245,7 @@ helper/sky-service.mjs  运行时的 Sky 服务：turn-ended 钩子 + 控制通�
 | 加载时报 `computer use is unavailable (…)`，或没有工具 | 应用解析失败。日志里有原因和路径；检查 `app`。 |
 | `no userQuestions service -> cancel (fail closed)` | 这个 profile 里没挂载提问界面。 |
 | `refusing to approve the app hosting this agent` | 按设计工作；换一个应用。 |
-| ChatGPT 应用仍显示某应用正被 computer use 占用 | 让模型调 `computer_use_stop`，或关掉会话 —— 连接拥有运行时进程树，退出时会释放。 |
+| ChatGPT 应用仍显示某应用正被 computer use 占用 | 让模型调 `cua.stopApp()`，或关掉会话 —— 连接拥有运行时进程树，退出时会释放。 |
 | `chrome: true` 但 Chrome 标签页一直不出现 | 那个浏览器 profile 里没启用官方扩展。打开 `chrome://extensions` 启用它，并确认它出现在 `cua.getState()` 里。 |
 | 某应用后续每个回合都报 "explicitly stopped by the user" | 宿主应用的回合清理没跑成。检查日志里的 `turn cleanup` 失败；退出并重启 ChatGPT 应用可清除该状态。 |
 
@@ -270,7 +273,7 @@ helper/sky-service.mjs  运行时的 Sky 服务：turn-ended 钩子 + 控制通�
 ## 已知限制与未做的工作
 
 - **被委派的子代理无法被询问批准。** DSH 只接受来自活跃 runtime root 的人的回答，所以子代理的批准会 fail closed。子代理可以做不需要批准的只读工作；需要批准的事必须从顶层会话驱动。
-- **按应用的 Stop 会被"请求它的那个回合"释放。** `computer_use_stop`（以及在宿主应用的"正在使用你的电脑"横幅上按 Esc）会请求运行时**在当前回合内**停用某一个应用。插件通过应用自己的 IPC 执行宿主应用的 turn-ended 清理，所以**下一个回合可以重新使用那个应用**；不带参数的 `computer_use_stop` 会报告当前持有哪些。如果某应用后续每个回合仍被拒绝，说明那次清理失败了，日志会写明。**常规使用 —— 截图、点击、输入、浏览器标签页 —— 不受影响**；插件的工具描述也这么写，所以模型不会自行去停用某个应用。
+- **按应用的 Stop 会被"请求它的那个回合"释放。** `cua.stopApp()`（以及在宿主应用的"正在使用你的电脑"横幅上按 Esc）会请求运行时**在当前回合内**停用某一个应用。插件通过应用自己的 IPC 执行宿主应用的 turn-ended 清理，所以**下一个回合可以重新使用那个应用**；不带参数的 `cua.stopApp()` 会报告当前持有哪些。如果某应用后续每个回合仍被拒绝，说明那次清理失败了，日志会写明。**常规使用 —— 截图、点击、输入、浏览器标签页 —— 不受影响**；插件的工具描述也这么写，所以模型不会自行去停用某个应用。
 - **`js` 沙箱不能写文件。** 每一次写入都以 `EPERM` 失败，**包括临时目录**，所以截图无法从 `js` 里保存。图片改为以附件形式交给 harness，每张存下来的图都会在工具结果里带上它的宿主文件系统路径；把它复制进工作区是一行 `bash`（`install -m 644 '<path>' <target>` —— 存储对象的模式是 400）。插件在工具结果和注入的指令里都写了这两点。
 - **macOS 权限属于 harness，不属于 OpenAI 助手。** macOS 把权限请求归给**负责进程**，而 harness 派生的一切都归给 harness 自己。所以屏幕录制和辅助功能必须给 **DeepSeek Harness** 打开；只给 ChatGPT 或 "Codex Computer Use" 是不够的，而且 macOS **不会自己弹窗**询问缺失的那些。
 - **没有 Codex 账号时的浏览器面还没接。** 驱动页面靠桌面应用注册的 native messaging host。那台"没有 Codex 应用"的机器上需要的 relay（强制扩展的 agent-request header）还没有实现。

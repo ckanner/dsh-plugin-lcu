@@ -33,17 +33,21 @@ downloaded, rewritten or authenticated.
 
 | Tool | What it does |
 |---|---|
-| `js` | Run one JavaScript program against the `cua` desktop/browser API. The first call returns the API documentation, and app or tab selection returns the initial UI state. |
-| `js_reset` | Discard the persistent JavaScript session and start a fresh runtime. |
+| `cua` | The PTC bridge to the desktop/browser runtime. `cua.getState`, `cua.getApp`, `cua.getBrowser`, `cua.getTab` and `cua.createBrowserTab` return values or handles; handle methods (screenshots, clicks, typing, AX reads) run through the same binding. |
 
-Two host-only tools stay reachable by the plugin and are **never** shown to the model:
-`turn_ended` (per-turn cleanup) and `js_add_node_module_dir`.
+The plugin adds the bridge, not a native `js` tool. PTC programs initialize it with
+`connectCua` and use the runtime exactly like the old `cua` object:
 
-The plugin adds exactly one tool of its own:
+```ts
+var { connectCua } = await import('<profile>/node_modules/dsh-plugin-lcu/lib/bridge.js')
+var cua = connectCua((request) => tools.cua(request), text => console.log(text))
+const state = await cua.getState()
+const app = await cua.getApp('Finder')
+```
 
-| Tool | What it does |
-|---|---|
-| `computer_use_stop` | With no argument, list the applications the runtime currently holds for this session. With `app` set to one of their bundle identifiers, release it. It clears the host application's "computer use is active" state for one application without ending the session. |
+`cua.stopApp(app?)` lists or releases held applications; `cua.reset()` clears the
+runtime. The old host-only `turn_ended` / `js_add_node_module_dir` tools remain
+internal and are never shown to the model.
 
 Screenshots arrive as durable images through DSH's attachment store, so a model route that declares
 image input can actually look at the screen.
@@ -91,7 +95,7 @@ This writes a marked block into that profile's `cordis.patch.yml` containing two
 | Preset | Base | Adds |
 |---|---|---|
 | `daily` | the shipped `ptc` preset | a Codex delegation provider of its own |
-| `heavy` | the same, with `tool-presentation: native` | everything above, and this plugin attaches |
+| `heavy` | the same, with `tool-executor-ptc` | everything above, plus the PTC `cua` Computer/Browser bridge |
 
 Re-run it after a DSH upgrade so the copies keep up. `--daily-only` emits just `daily`, `--dry-run`
 prints without writing, and `--out FILE` writes somewhere else. The official Codex tool is no longer
@@ -100,10 +104,9 @@ a separate provider registers its own same-named tool per Agent for the generate
 the global one. Two registrations in one scope still collide, so nothing may enable a same-name
 `tool-subagent` row beside that provider.
 
-> `heavy` sets the tool presentation to `native` on purpose. DSH 0.2.1 removed the old `both` mode —
-> a preset declares one presentation, `native` or `ptc` — and in pure `ptc` presentation the model
-> only sees `run_code`, so `js` would have to be nested as a JavaScript string inside another
-> JavaScript program. `native` keeps `js` directly callable and gives up PTC for that preset.
+> Both presets use PTC. The plugin's PTC bridge turns the runtime's `cua` object into a
+> `tools.cua` binding, so the model writes one `run_code` program instead of nesting a
+> `js` string inside another JavaScript program.
 
 ### 3. Configure which modes get the capability
 
@@ -115,15 +118,16 @@ The plugin is one root row with a `presets` allowlist. Edit the installed `cordi
   name: 'dsh-plugin-lcu'
   config:
     presets:
+      - daily
       - heavy
 ```
 
 ### 4. Restart, then make one call
 
 Restart the harness — plugin **code and configuration changes are not hot-reloaded**. Then start a
-task in the `heavy` mode (displayed as **重活**) and ask it to do something harmless:
+task in either mode and ask it to do something harmless:
 
-> Use the `js` tool to run `await cua.getState();` and tell me which apps are running.
+> Use the PTC `cua` bridge to run `await cua.getState();` and tell me which apps are running.
 
 The first time an app is touched, the runtime asks for approval. See below.
 
@@ -185,7 +189,7 @@ Open Safari, go to example.com and read the page title.
 | `command` | unset | An explicit executable that replaces the computed launch, for an application the built-in resolution cannot reach. It bypasses the runtime's own environment setup. |
 | `chrome` | `false` | Enable the browser surface. |
 | `audio` | `false` | Enable the runtime's computer-audio API. |
-| `presets` | `["heavy"]` | Agent preset ids whose sessions get the tools. |
+| `presets` | `["daily", "heavy"]` | Agent preset ids whose sessions get the PTC bridge. |
 | `allowedOrigins` | `[]` | Exact HTTP(S) origins answered without asking. Invalid entries are dropped, never widened. |
 | `allowedApps` | `[]` | Bundle identifiers computer use may use without asking. The application hosting the agent is refused even when it is listed here. |
 | `sectionOrder` | `0` | Prompt section order for the injected runtime instructions. |
@@ -318,7 +322,7 @@ otherwise swallowed silently.
 | `computer use is unavailable (…)` at load, or no tools | The application could not be resolved. The log names the reason and the path; check `app`. |
 | `no userQuestions service -> cancel (fail closed)` | The approval surface is not mounted in this profile. |
 | `refusing to approve the app hosting this agent` | Working as designed; ask for a different app. |
-| The ChatGPT app still shows computer use on an app | Ask for `computer_use_stop`, or close the session — the connection owns the runtime process tree and releases it on the way out. |
+| The ChatGPT app still shows computer use on an app | Ask for `cua.stopApp()`, or close the session — the connection owns the runtime process tree and releases it on the way out. |
 | Chrome tabs never appear with `chrome: true` | The official extension is not enabled in that browser profile. Open `chrome://extensions`, enable it, and confirm it shows up in `cua.getState()`. |
 | An application refuses every turn with "explicitly stopped by the user" | The host application's turn cleanup has not run. Check the log for a `turn cleanup` failure, and quit and relaunch the ChatGPT application to clear the state. |
 
@@ -362,10 +366,10 @@ usually wants both:
 - **A delegated child cannot be asked for approval.** DSH only accepts a human answer for a live
   runtime root, so a subagent's approval fails closed. Subagents can perform read-only work that
   needs no approval; anything that needs one must be driven from the top-level session.
-- **A per-application Stop is released by the turn that asked for it.** `computer_use_stop` — and pressing
+- **A per-application Stop is released by the turn that asked for it.** `cua.stopApp()` — and pressing
   Esc on the host application's "using your computer" banner — ask the runtime to stop using one application
   for the current turn. The plugin performs the host application's turn-ended cleanup through its own IPC, so
-  the next turn can use that application again, and `computer_use_stop` with no argument reports what is held.
+  the next turn can use that application again, and `cua.stopApp()` with no argument reports what is held.
   If an application is still refused every turn, that cleanup failed and the log says so. **Ordinary use —
   screenshots, clicks, typing, browser tabs — is unaffected**; the plugin's tool description says so, so a
   model does not stop an application on its own initiative.

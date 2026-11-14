@@ -1,12 +1,9 @@
 /**
  * Model-facing tools for LCU.
  *
- * The server owns the tool contract: `js` carries a ~1.5 KB description that is
- * the API manual, and the model is told to read documentation out of the first
- * tool result. So the definitions here are the server's, passed through
- * unchanged — this module only adapts the transport (canonical value, text
- * fallback, durable images) and enforces the visibility rule that only `js` and
- * `js_reset` may reach the model.
+ * These builders predate the PTC surface and remain for the internal `js`
+ * transport plus the tests that cover it. The model-facing registration in
+ * `index.ts` now uses `ptc.ts`: PTC programs see `cua`, never `js`.
  *
  * @module dsh-plugin-lcu/tool
  */
@@ -126,7 +123,7 @@ async function resolveAttachments(ctx: Context, exec: ToolRunContext): Promise<A
  * exactly as the server emitted them, with any inadmissible image replaced by a
  * diagnostic instead of failing the whole call.
  */
-async function prepareProjection(
+export async function prepareProjection(
   ctx: Context,
   exec: ToolRunContext,
   content: readonly LcuContentBlock[],
@@ -369,7 +366,7 @@ export function createLcuTool(
 }
 
 /**
- * Build every model-facing tool for one agent's connection.
+ * Build the legacy native tools for one agent's connection.
  *
  * @param connection - the connected LCU session.
  * @param ctx - the plugin context.
