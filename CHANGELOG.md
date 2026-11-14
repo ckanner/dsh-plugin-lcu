@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.2
+
+Expose read-only scalar properties on PTC handles.
+
+- Handle objects now carry a snapshot of their non-function properties
+  (tab.id, tab.title, app.name, browserId, and similar), so returning or reading
+  those values no longer yields a function and invalid JSON.
+- Methods remain routed through tools.cua; nested handles are decoded with their
+  properties intact.
+
+
 ## 0.4.1
 
 Fix two PTC bridge edge cases found by a live macOS run.
