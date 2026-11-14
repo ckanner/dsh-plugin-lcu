@@ -314,6 +314,12 @@ export async function attachManagedLcu(ctx: Context, options: ManagedLcuOptions)
       if (turnController.signal.aborted || exec.signal.aborted) throw new ManagedLcuError('LCU call canceled during admission', snapshot())
       state = 'active'
       await emit('call.started', { method: request.method, ...(request.target === undefined ? {} : { target: request.target }) }, exec)
+      // Committing a host receipt can outlive authority or an app update.
+      // No native operation has begun yet: revalidate the exact live actor,
+      // lease, pinned runtime and cancellation at this last dispatch boundary.
+      await verifyAdmission('call', exec, request.method)
+      await boundRuntime.prepare()
+      if (turnController.signal.aborted || exec.signal.aborted) throw new ManagedLcuError('LCU call canceled while its receipt was committed', snapshot())
       turnCleanupConfirmed = false
       try {
         const result = await operation()

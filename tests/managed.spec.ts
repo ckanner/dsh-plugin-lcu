@@ -234,6 +234,26 @@ test('an approval cannot outlive the lease while its event receipt is committed'
   assert.equal((await handle.close()).cleanup,'confirmed')
 })
 
+for (const change of ['lease', 'actor', 'cancel', 'generation']) test(`a ${change} change during call-start receipt commit prevents native dispatch`,async t=>{
+  const f=fixture(t,{images:0}),h=harness(),o=options(h,f.app,f.app)
+  let valid=true
+  const controller=new AbortController()
+  const handle=await attached(t,h,{...o.opts,
+    verifyLease:async()=>{if(!valid)throw new Error('lease revoked')},
+    onEvent:async event=>{
+      await o.opts.onEvent(event)
+      if(event.type!=='call.started')return
+      if(change==='lease')valid=false
+      else if(change==='actor')h.unregister()
+      else if(change==='cancel')controller.abort()
+      else writeFileSync(join(f.runtime,'manifest.json'),'{"generation":"replacement"}')
+    },
+  })
+  await assert.rejects(()=>h.execute({method:'action',args:['must-not-run']},controller.signal),/revoked|live Agent|canceled|generation|changed/i)
+  assert.equal(f.rows().some(row=>row.event==='start'),false)
+  assert.equal((await handle.close()).cleanup,'confirmed')
+})
+
 test('removing an admitted Agent during lease verification prevents its next native action',async t=>{
   const f=fixture(t,{images:0}),h=harness(),o=options(h,f.app,f.app)
   const handle=await attached(t,h,{...o.opts,verifyLease:async admission=>{if(admission.phase==='call')h.unregister()}})
