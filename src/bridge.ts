@@ -77,6 +77,11 @@ export function connectCua(call: CuaBridgeCall, log?: (text: string) => void): C
   const decode = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(decode)
     if (isRecord(value) && typeof value.__handle === 'string') return makeHandle(value.__handle)
+    if (isRecord(value)) {
+      const out: Record<string, unknown> = {}
+      for (const [key, child] of Object.entries(value)) out[key] = decode(child)
+      return out
+    }
     return value
   }
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1
+
+Fix two PTC bridge edge cases found by a live macOS run.
+
+- Treat cross-realm ArrayBuffer views (including the runtime screenshot Buffer)
+  as byte payloads instead of opaque handles, so cua.getScreenshot() can be
+  returned as lossless JSON while the image still enters the attachment pipeline.
+- Decode handles nested inside plain objects, so browser metadata and tab
+  handles from cua.getState() are callable objects rather than raw handle values.
+
+
 ## 0.4.0
 
 PTC Computer Use.

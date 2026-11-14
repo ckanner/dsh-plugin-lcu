@@ -48,6 +48,26 @@ test('the program-side proxy turns handles into routable method calls', async ()
     { method: 'getApp', args: ['Finder'] },
     { target: 'h1', method: 'activate' },
   ])
+
+  const state = await cua.getState()
+  assert.equal(typeof state, 'object')
+})
+
+test('nested handle objects are decoded, not left as raw __handle values', async () => {
+  const calls: CuaBridgeRequest[] = []
+  const cua = connectCua(async (request) => {
+    calls.push(request)
+    if (request.method === 'getState') {
+      return { apps: [], browsers: [{ metadata: { __handle: 'b1' }, tabs: [{ __handle: 't1' }] }] }
+    }
+    if (request.target === 't1' && request.method === 'getTitle') return 'Example'
+    return null
+  })
+
+  const state = await cua.getState()
+  const tab = state.browsers[0].tabs[0]
+  assert.equal(typeof tab.getTitle, 'function')
+  assert.equal(await tab.getTitle(), 'Example')
 })
 
 test('the host tool sends a bridge program and returns its JSON value', async () => {

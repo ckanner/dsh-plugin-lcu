@@ -72,6 +72,7 @@ globalThis.__dshLcu ??= (() => {
     if (value instanceof String) return String(value)
     if (value instanceof Number) return Number(value)
     if (value instanceof Boolean) return Boolean(value)
+    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(value)) return { __bytes: value.byteLength }
     if (value instanceof Uint8Array) return { __bytes: value.length }
     if (value === null || typeof value !== 'object') return value
     if (Array.isArray(value)) return value.map((item) => encode(item, seen))

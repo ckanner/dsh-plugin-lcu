@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-lcu",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "PTC Computer/Browser CUA for DeepSeek Harness, backed by the runtime inside the ChatGPT desktop application.",
   "keywords": [
     "dsh-plugin",
