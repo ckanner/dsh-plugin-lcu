@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1
+
+- Accept the DSH 0.2.1-rc.5 through 0.3 compatibility window for the host
+  tools/system-prompt peers. Required capability checks remain fail-closed.
+
 ## 0.5.0
 
 Managed SDK computer use and an explicit PTC/media contract.
